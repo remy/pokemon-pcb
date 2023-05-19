@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PCB X-ray</title>
+    <style>
+      :root {
+        --opacity: 0.5;
+      }
+
+      html,
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+      }
+
+      main {
+        display: grid;
+        grid-template-areas: "home";
+      }
+
+      main.flip {
+        transform: scaleX(-1);
+      }
+
+      main img {
+        margin: 0 auto;
+        max-width: 100vw;
+        max-height: 100vh;
+        grid-area: home;
+      }
+
+      label,
+      input {
+        cursor: pointer;
+      }
+
+      #help {
+        z-index: 100;
+        position: absolute;
+        list-style: none;
+        margin: 0;
+        padding: 12px;
+        pointer-events: none;
+        user-select: none;
+      }
+
+      .layer {
+        opacity: var(--opacity);
+      }
+
+      #help .allow {
+        pointer-events: all;
+      }
+
+      #download {
+        position: absolute;
+        margin: 20px;
+        bottom: 0;
+        right: 0;
+      }
+    </style>
+  </head>
+
+  <body>
+    <ul id="help">
+      <li><code>w</code>/<code>s</code> to move through layers
+        <br><input class="allow" type="range" value="5" min="0" max="5" id="layer">
+      <li><code>f</code> to flip
+      <li>Use browser to zoom
+      <li class="allow">Layer opacity<br><input type="range" value="50" min="1" max="100" id="opacity">
+    </ul>
+    <main></main>
+    <a id="download" href="./pm/pm-layers.psd">Download .psd</a>
+    <script type="module" src="app.js"></script>
+  </body>
+
+</html>
