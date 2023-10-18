@@ -20,6 +20,12 @@
       main {
         display: grid;
         grid-template-areas: "home";
+        align-items: center;
+        min-height: 100vh;
+      }
+
+      button {
+        cursor: pointer;
       }
 
       main.flip {
@@ -69,7 +75,7 @@
     <ul id="help">
       <li><code>w</code>/<code>s</code> to move through layers
         <br><input class="allow" type="range" value="5" min="0" max="5" id="layer">
-      <li><code>f</code> to flip
+      <li><button class="allow" id="flip">flip</button>
       <li>Use browser to zoom
       <li class="allow">Layer opacity<br><input type="range" value="50" min="1" max="100" id="opacity">
     </ul>

@@ -1,6 +1,6 @@
-function getVar(el, prop) {
-  return getComputedStyle(el).getPropertyValue('--' + prop);
-}
+// function getVar(el, prop) {
+//   return getComputedStyle(el).getPropertyValue('--' + prop);
+// }
 
 function setVar(el, prop, val) {
   return el.style.setProperty('--' + prop, val);
@@ -15,7 +15,11 @@ document.querySelector('#opacity').oninput = (e) => {
   setVar(document.documentElement, 'opacity', e.target.value / 100);
 };
 
-let scale = 1;
+document.querySelector('#flip').onclick = () => {
+  root.classList.toggle('flip');
+};
+
+// let scale = 1;
 let visible = null;
 
 function moveTo(i) {
