@@ -165,6 +165,14 @@
         vector-effect: non-scaling-stroke;
       }
 
+      .net-via-draft {
+        fill: none;
+        stroke: #ffffff;
+        stroke-width: 1;
+        stroke-dasharray: 4 4;
+        vector-effect: non-scaling-stroke;
+      }
+
       .net-anchor {
         fill: #dce8ff;
         stroke: #0b1220;
@@ -290,10 +298,12 @@
           <div class="tool-grid">
             <button data-tool="select" class="is-active" title="Select and inspect one net path">Select (V)</button>
             <button data-tool="polygon" title="Lasso-draw a closed polygon path for a new net">Polygon (P)</button>
+            <button data-tool="line" title="Draw a freehand line net and drop via circles with I while drawing">Line (L)</button>
             <button data-tool="magnet" title="Trace with point snapping to PCB edges from the current layer image">Magnet (M)</button>
             <button data-tool="pan" title="Pan the canvas by dragging">Pan (H)</button>
           </div>
           <div class="small">Polygon mode: press and drag to lasso a shape. Release to create the net path.</div>
+          <div class="small">Line mode: drag to draw; press <code>I</code> while drawing to add via circles. Press <code>Esc</code> to finish.</div>
           <div class="small">Magnet mode: drag to trace; points snap to nearby high-contrast PCB features.</div>
           <div class="small">Select mode: drag anchors to reshape. Right-click path/anchor to add or delete nodes.</div>
           <div class="small">Click an anchor to select it, then press <code>B</code> to toggle that node between corner/smooth.</div>

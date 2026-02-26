@@ -2,6 +2,7 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const CANVAS_SIZE = 1765;
 const STORAGE_KEY = 'pcb-xray-net-editor-v2';
 const MAX_UNDO_ENTRIES = 100;
+const LINE_VIA_RADIUS = 5;
 const ANCHOR_HIT_RADIUS_PX = 9;
 const ANCHOR_MARKER_RADIUS_PX = 2.3;
 const ANCHOR_MARKER_SELECTED_RADIUS_PX = 3.2;
@@ -58,11 +59,13 @@ const state = {
   panning: null,
   drawing: null,
   anchorDrag: null,
+  lastPointerPoint: null,
   suppressOverlayClick: false,
   nodeMenuState: null,
   selectedUid: null,
   selectedAnchorIndex: null,
   drawPoints: [],
+  drawVias: [],
   nextUid: 1,
   isApplyingUndo: false,
   undo: {
@@ -219,6 +222,10 @@ function serializePointModes(pointModes) {
 }
 
 function parsePoints(value) {
+  return parsePointsWithMin(value, 3);
+}
+
+function parsePointsWithMin(value, minPoints = 3) {
   if (!value || typeof value !== 'string') return null;
 
   const parsed = value
@@ -232,8 +239,40 @@ function parsePoints(value) {
     })
     .filter(Boolean);
 
-  if (parsed.length < 3) return null;
+  if (parsed.length < minPoints) return null;
   return parsed;
+}
+
+function parseVias(value) {
+  if (!value || typeof value !== 'string') return [];
+  return value
+    .split(';')
+    .map((chunk) => chunk.trim())
+    .filter(Boolean)
+    .map((chunk) => {
+      const [xRaw, yRaw, rRaw] = chunk.split(',').map((token) => parseFloat(token));
+      if (!Number.isFinite(xRaw) || !Number.isFinite(yRaw)) return null;
+      const x = clamp(xRaw, 0, CANVAS_SIZE);
+      const y = clamp(yRaw, 0, CANVAS_SIZE);
+      const radius = clamp(Number.isFinite(rRaw) ? rRaw : LINE_VIA_RADIUS, 0.5, 80);
+      return [x, y, radius];
+    })
+    .filter(Boolean);
+}
+
+function serializeVias(vias) {
+  if (!Array.isArray(vias) || !vias.length) return '';
+  return vias
+    .map((via) => {
+      const x = Number(via[0]);
+      const y = Number(via[1]);
+      const r = Number(via[2]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      const radius = Number.isFinite(r) ? r : LINE_VIA_RADIUS;
+      return `${x.toFixed(2)},${y.toFixed(2)},${radius.toFixed(2)}`;
+    })
+    .filter(Boolean)
+    .join(';');
 }
 
 function parsePointModes(value, expectedLength) {
@@ -253,12 +292,13 @@ function parsePointModes(value, expectedLength) {
   return parsed;
 }
 
-function extractPointsFromSimplePath(d) {
+function extractPointsFromSimplePath(d, minPoints = 3) {
   if (!d) return null;
   if (/[CQSTAHV]/i.test(d)) return null;
 
   const numbers = (d.match(/-?\d*\.?\d+(?:e[-+]?\d+)?/gi) || []).map(Number);
-  if (numbers.length < 6 || numbers.length % 2 !== 0) return null;
+  const required = Math.max(2, Number.isFinite(minPoints) ? Math.floor(minPoints) : 3);
+  if (numbers.length < required * 2 || numbers.length % 2 !== 0) return null;
 
   const points = [];
   for (let i = 0; i < numbers.length; i += 2) {
@@ -276,7 +316,7 @@ function extractPointsFromSimplePath(d) {
     }
   }
 
-  return points.length >= 3 ? points : null;
+  return points.length >= required ? points : null;
 }
 
 function pointsToPath(points, pointModes = null, closed = true) {
@@ -395,6 +435,33 @@ function smoothClosedPolygon(points, strength) {
   return output;
 }
 
+function smoothOpenPolyline(points, strength) {
+  if (!Array.isArray(points) || points.length < 3) {
+    return points ? points.map((point) => [...point]) : [];
+  }
+
+  const alpha = clamp(strength, 0.01, 1);
+  const n = points.length;
+  const output = [points[0].map((value) => value)];
+
+  for (let i = 1; i < n - 1; i += 1) {
+    const prev = points[i - 1];
+    const cur = points[i];
+    const next = points[i + 1];
+
+    const avgX = (prev[0] + next[0]) / 2;
+    const avgY = (prev[1] + next[1]) / 2;
+
+    output.push([
+      cur[0] * (1 - alpha) + avgX * alpha,
+      cur[1] * (1 - alpha) + avgY * alpha,
+    ]);
+  }
+
+  output.push(points[n - 1].map((value) => value));
+  return output;
+}
+
 function buildEdgeMap(imageData) {
   if (!imageData) return null;
 
@@ -506,6 +573,37 @@ function inferFallbackModeFromPath(rawD, legacyCurveMode) {
   return 'corner';
 }
 
+function normalizePathKind(value) {
+  return value === 'line' ? 'line' : 'area';
+}
+
+function viaCirclesToPath(vias) {
+  if (!Array.isArray(vias) || !vias.length) return '';
+  const commands = [];
+  vias.forEach((via) => {
+    if (!Array.isArray(via) || via.length < 2) return;
+    const x = clamp(parseFloat(via[0]), 0, CANVAS_SIZE);
+    const y = clamp(parseFloat(via[1]), 0, CANVAS_SIZE);
+    const r = clamp(parseFloat(via[2]) || LINE_VIA_RADIUS, 0.5, 80);
+    commands.push(
+      `M ${(x - r).toFixed(2)} ${y.toFixed(2)}`,
+      `a ${r.toFixed(2)} ${r.toFixed(2)} 0 1 0 ${(2 * r).toFixed(2)} 0`,
+      `a ${r.toFixed(2)} ${r.toFixed(2)} 0 1 0 ${(-2 * r).toFixed(2)} 0`
+    );
+  });
+  return commands.join(' ');
+}
+
+function buildPathD(path) {
+  if (!path || !Array.isArray(path.points)) return '';
+  const isLine = normalizePathKind(path.pathKind) === 'line';
+  const base = pointsToPath(path.points, path.pointModes, !isLine);
+  if (!base) return '';
+  if (!isLine) return base;
+  const viasPath = viaCirclesToPath(path.vias);
+  return viasPath ? `${base} ${viasPath}` : base;
+}
+
 function normalizePath(raw) {
   const d = String(raw?.d || '').trim();
   const netId = String(raw?.netId || '').trim() || `net-${Date.now()}`;
@@ -513,6 +611,19 @@ function normalizePath(raw) {
   const category = String(raw?.category || categoryFromNetId(netId)).trim() || categoryFromNetId(netId);
   const color = String(raw?.color || '#ffe05e').trim() || '#ffe05e';
   const strokeWidth = clamp(parseFloat(raw?.strokeWidth) || 1, 0.1, 20);
+  const pathKind = normalizePathKind(raw?.pathKind || raw?.editorKind);
+  const vias = Array.isArray(raw?.vias)
+    ? raw.vias
+        .map((via) => {
+          if (!Array.isArray(via) || via.length < 2) return null;
+          const x = parseFloat(via[0]);
+          const y = parseFloat(via[1]);
+          const r = parseFloat(via[2]);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+          return [clamp(x, 0, CANVAS_SIZE), clamp(y, 0, CANVAS_SIZE), clamp(Number.isFinite(r) ? r : LINE_VIA_RADIUS, 0.5, 80)];
+        })
+        .filter(Boolean)
+    : parseVias(raw?.editorVias || '');
 
   let points = null;
   if (Array.isArray(raw?.points)) {
@@ -526,11 +637,11 @@ function normalizePath(raw) {
       })
       .filter(Boolean);
 
-    if (points.length < 3) points = null;
+    if (points.length < (pathKind === 'line' ? 2 : 3)) points = null;
   }
 
-  if (!points) points = parsePoints(raw?.editorPoints || '');
-  if (!points) points = extractPointsFromSimplePath(d);
+  if (!points) points = parsePointsWithMin(raw?.editorPoints || '', pathKind === 'line' ? 2 : 3);
+  if (!points) points = extractPointsFromSimplePath(d, pathKind === 'line' ? 2 : 3);
 
   const parsedPointModes = parsePointModes(
     raw?.editorPointModes || raw?.pointModes || '',
@@ -543,7 +654,7 @@ function normalizePath(raw) {
 
   let finalD = d;
   if ((!finalD || !finalD.length) && points) {
-    finalD = pointsToPath(points, pointModes, true);
+    finalD = buildPathD({ points, pointModes, pathKind, vias });
   }
   if (!finalD || !finalD.length) return null;
 
@@ -555,6 +666,8 @@ function normalizePath(raw) {
     category,
     color,
     strokeWidth,
+    pathKind,
+    vias,
     points,
     pointModes,
   };
@@ -570,6 +683,19 @@ function cloneSerializablePath(path) {
     category: String(path.category || categoryFromNetId(netId)),
     color: String(path.color || '#ffe05e'),
     strokeWidth: clamp(parseFloat(path.strokeWidth) || 1, 0.1, 20),
+    pathKind: normalizePathKind(path.pathKind),
+    vias: Array.isArray(path.vias)
+      ? path.vias
+          .map((via) => {
+            if (!Array.isArray(via) || via.length < 2) return null;
+            const x = Number(via[0]);
+            const y = Number(via[1]);
+            const r = Number(via[2]);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+            return [x, y, Number.isFinite(r) ? r : LINE_VIA_RADIUS];
+          })
+          .filter(Boolean)
+      : [],
     points: Array.isArray(path.points)
       ? path.points.map((point) => [Number(point[0]), Number(point[1])])
       : null,
@@ -739,7 +865,7 @@ function restoreDraft() {
     state.layerImage = clamp(parseInt(data.layerImage, 10) || 1, 1, 6);
     elements.layerImage.value = String(state.layerImage);
 
-    const validTools = ['select', 'polygon', 'magnet', 'pan'];
+    const validTools = ['select', 'polygon', 'line', 'magnet', 'pan'];
     state.tool = validTools.includes(data.tool) ? data.tool : 'select';
 
     state.zoom = clamp(parseFloat(data.zoom) || 1, 0.25, 40);
@@ -890,18 +1016,21 @@ function ensureSelectedPath() {
 }
 
 function updatePathGeometry(path) {
-  if (!path || !Array.isArray(path.points) || path.points.length < 3) return;
+  if (!path || !Array.isArray(path.points)) return;
+  const minPoints = normalizePathKind(path.pathKind) === 'line' ? 2 : 3;
+  if (path.points.length < minPoints) return;
   path.pointModes = normalizePointModes(path.pointModes, path.points.length, 'corner');
-  path.d = pointsToPath(path.points, path.pointModes, true);
+  path.d = buildPathD(path);
 }
 
-function findNearestSegmentIndex(points, point) {
+function findNearestSegmentIndex(points, point, closed = true) {
   if (!Array.isArray(points) || points.length < 2) return 0;
 
   let bestIndex = 0;
   let bestDistance = Number.POSITIVE_INFINITY;
+  const segmentCount = closed ? points.length : points.length - 1;
 
-  for (let i = 0; i < points.length; i += 1) {
+  for (let i = 0; i < segmentCount; i += 1) {
     const a = points[i];
     const b = points[(i + 1) % points.length];
     const distance = pointToSegmentDistance2(point, a, b);
@@ -987,10 +1116,11 @@ function loadBaseImage() {
 
 function setTool(tool, options = {}) {
   const { save = true, announce = true } = options;
-  if (!['select', 'polygon', 'magnet', 'pan'].includes(tool)) return;
+  if (!['select', 'polygon', 'line', 'magnet', 'pan'].includes(tool)) return;
 
   state.tool = tool;
   state.drawPoints = [];
+  state.drawVias = [];
   state.drawing = null;
   if (tool !== 'select') {
     state.selectedAnchorIndex = null;
@@ -1006,6 +1136,8 @@ function setTool(tool, options = {}) {
   if (announce) {
     if (tool === 'polygon') {
       setStatus('Tool: polygon. Drag on the board to draw a new closed net shape.');
+    } else if (tool === 'line') {
+      setStatus('Tool: line. Drag to draw, press I to drop vias, Esc to finish.');
     } else if (tool === 'magnet') {
       setStatus('Tool: magnet. Drag to trace with snapping to nearby PCB edges.');
     } else {
@@ -1173,12 +1305,18 @@ function ensurePathVisible(path) {
 }
 
 function createPathElements(path) {
+  const isLine = normalizePathKind(path.pathKind) === 'line';
   const visual = document.createElementNS(SVG_NS, 'path');
   visual.setAttribute('d', path.d);
   visual.setAttribute('stroke', path.color);
   visual.setAttribute('stroke-width', String(path.strokeWidth));
-  visual.setAttribute('fill', path.color);
-  visual.setAttribute('fill-opacity', state.debugFillOpacity.toFixed(2));
+  if (isLine) {
+    visual.setAttribute('fill', 'none');
+    visual.setAttribute('fill-opacity', '0');
+  } else {
+    visual.setAttribute('fill', path.color);
+    visual.setAttribute('fill-opacity', state.debugFillOpacity.toFixed(2));
+  }
   visual.setAttribute('class', 'net-path is-selected');
   visual.dataset.uid = path.uid;
 
@@ -1192,7 +1330,7 @@ function createPathElements(path) {
 }
 
 function createAnchorElements(path) {
-  if (!Array.isArray(path.points) || path.points.length < 3) return [];
+  if (!Array.isArray(path.points) || path.points.length < 1) return [];
 
   return path.points.flatMap((point, index) => {
     const [x, y] = point;
@@ -1237,14 +1375,31 @@ function renderOverlay() {
 
   if (state.drawPoints.length > 1) {
     const draft = document.createElementNS(SVG_NS, 'path');
-    const d = pointsToPath(state.drawPoints, null, true);
+    const isLine = normalizePathKind(state.tool) === 'line';
+    const d = pointsToPath(state.drawPoints, null, !isLine);
     if (d) draft.setAttribute('d', d);
     draft.setAttribute('class', 'net-draft');
-    const netColor = currentNetColor();
-    draft.setAttribute('stroke', netColor);
-    draft.setAttribute('fill', netColor);
-    draft.setAttribute('fill-opacity', state.debugFillOpacity.toFixed(2));
+    draft.setAttribute('stroke', currentNetColor());
+    if (isLine) {
+      draft.setAttribute('fill', 'none');
+      draft.setAttribute('fill-opacity', '0');
+    } else {
+      draft.setAttribute('fill', currentNetColor());
+      draft.setAttribute('fill-opacity', state.debugFillOpacity.toFixed(2));
+    }
     elements.overlay.append(draft);
+
+    if (isLine && Array.isArray(state.drawVias) && state.drawVias.length) {
+      state.drawVias.forEach((via) => {
+        const [x, y, r] = via;
+        const circle = document.createElementNS(SVG_NS, 'circle');
+        circle.setAttribute('cx', x.toFixed(2));
+        circle.setAttribute('cy', y.toFixed(2));
+        circle.setAttribute('r', (Number.isFinite(r) ? r : LINE_VIA_RADIUS).toFixed(2));
+        circle.setAttribute('class', 'net-via-draft');
+        elements.overlay.append(circle);
+      });
+    }
   } else if (state.drawPoints.length === 1) {
     const point = state.drawPoints[0];
     const marker = document.createElementNS(SVG_NS, 'circle');
@@ -1256,9 +1411,16 @@ function renderOverlay() {
   }
 }
 
-function addPathFromPoints(points) {
-  if (!Array.isArray(points) || points.length < 3) {
-    setStatus('Polygon draw needs at least 3 points.');
+function addPathFromPoints(points, options = {}) {
+  const { pathKind = 'area', vias = [] } = options;
+  const kind = normalizePathKind(pathKind);
+  const minPoints = kind === 'line' ? 2 : 3;
+  if (!Array.isArray(points) || points.length < minPoints) {
+    if (kind === 'line') {
+      setStatus('Line draw needs at least 2 points.');
+    } else {
+      setStatus('Polygon draw needs at least 3 points.');
+    }
     return;
   }
 
@@ -1271,33 +1433,52 @@ function addPathFromPoints(points) {
 
   const path = {
     uid: `p-${state.nextUid++}`,
-    d: pointsToPath(normalizedPoints, null, true),
+    d: '',
     netId: meta.netId,
     netLabel: meta.netLabel,
     category: meta.category,
     color: meta.color,
     strokeWidth: meta.strokeWidth,
+    pathKind: kind,
+    vias: Array.isArray(vias)
+      ? vias
+          .map((via) => {
+            if (!Array.isArray(via) || via.length < 2) return null;
+            const x = clamp(parseFloat(via[0]), 0, CANVAS_SIZE);
+            const y = clamp(parseFloat(via[1]), 0, CANVAS_SIZE);
+            const r = clamp(parseFloat(via[2]) || LINE_VIA_RADIUS, 0.5, 80);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+            return [x, y, r];
+          })
+          .filter(Boolean)
+      : [],
     points: normalizedPoints,
     pointModes: Array.from({ length: normalizedPoints.length }, () => 'corner'),
   };
+  updatePathGeometry(path);
 
   currentPaths().push(path);
   applyColorToNet(meta.netId, meta.color, { save: false, announce: false, recordUndo: false });
   selectPath(path.uid, { save: false });
-  setStatus(`Added ${path.netLabel}.`);
+  setStatus(kind === 'line' ? `Added line ${path.netLabel}.` : `Added ${path.netLabel}.`);
   saveDraft();
 }
 
 function commitDrawPath() {
-  if (state.drawPoints.length < 3) {
+  const isLineTool = normalizePathKind(state.tool) === 'line';
+  const minPoints = isLineTool ? 2 : 3;
+  if (state.drawPoints.length < minPoints) {
     state.drawPoints = [];
+    state.drawVias = [];
     renderOverlay();
     return;
   }
 
   const points = state.drawPoints;
+  const vias = state.drawVias;
   state.drawPoints = [];
-  addPathFromPoints(points);
+  state.drawVias = [];
+  addPathFromPoints(points, { pathKind: isLineTool ? 'line' : 'area', vias });
   renderOverlay();
 }
 
@@ -1384,14 +1565,17 @@ function simplifySelectedPath() {
     setStatus('Select a path first.');
     return;
   }
-  if (!Array.isArray(path.points) || path.points.length < 4) {
+  const isLine = normalizePathKind(path.pathKind) === 'line';
+  if (!Array.isArray(path.points) || path.points.length < (isLine ? 3 : 4)) {
     setStatus('Selected path does not have enough editable points to simplify.');
     return;
   }
 
   const epsilon = clamp(parseFloat(elements.simplifyEpsilon.value) || 3, 0.1, 50);
   const before = path.points.length;
-  const simplified = simplifyClosedPolygon(path.points, epsilon);
+  const simplified = isLine
+    ? simplifyRdpOpen(path.points, epsilon).map((point) => [point[0], point[1]])
+    : simplifyClosedPolygon(path.points, epsilon);
   if (simplified.length >= before) {
     setStatus(`No points removed (tolerance ${epsilon.toFixed(1)}).`);
     return;
@@ -1421,7 +1605,9 @@ function smoothSelectedPath() {
 
   const strength = clamp(parseFloat(elements.smoothStrength.value) || 0.25, 0.05, 1);
   recordUndoSnapshot('Smooth path', { path });
-  path.points = smoothClosedPolygon(path.points, strength);
+  path.points = normalizePathKind(path.pathKind) === 'line'
+    ? smoothOpenPolyline(path.points, strength)
+    : smoothClosedPolygon(path.points, strength);
   updatePathGeometry(path);
   renderOverlay();
   setStatus(`Smoothed ${path.netLabel} (strength ${strength.toFixed(2)}).`);
@@ -1436,13 +1622,22 @@ function addNodeFromMenu() {
     return;
   }
 
+  const isLine = normalizePathKind(path.pathKind) === 'line';
   let insertPoint = menu.point;
   if (!insertPoint && Number.isInteger(menu.anchorIndex)) {
     const i = menu.anchorIndex;
-    const next = (i + 1) % path.points.length;
+    const next = isLine
+      ? clamp(i + 1, 0, path.points.length - 1)
+      : (i + 1) % path.points.length;
+    if (isLine && i >= path.points.length - 1 && path.points.length >= 2) {
+      const a = path.points[path.points.length - 2];
+      const b = path.points[path.points.length - 1];
+      insertPoint = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    } else {
     const a = path.points[i];
     const b = path.points[next];
     insertPoint = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    }
   }
   if (!insertPoint) {
     hideNodeMenu();
@@ -1451,9 +1646,9 @@ function addNodeFromMenu() {
 
   let segmentIndex;
   if (Number.isInteger(menu.anchorIndex)) {
-    segmentIndex = menu.anchorIndex;
+    segmentIndex = isLine ? clamp(menu.anchorIndex, 0, path.points.length - 2) : menu.anchorIndex;
   } else {
-    segmentIndex = findNearestSegmentIndex(path.points, insertPoint);
+    segmentIndex = findNearestSegmentIndex(path.points, insertPoint, !isLine);
   }
 
   const clamped = [
@@ -1480,9 +1675,14 @@ function deleteNodeFromMenu() {
     return;
   }
 
-  if (path.points.length <= 3) {
+  const minPoints = normalizePathKind(path.pathKind) === 'line' ? 2 : 3;
+  if (path.points.length <= minPoints) {
     hideNodeMenu();
-    setStatus('Cannot delete node: a closed path needs at least 3 points.');
+    if (minPoints === 2) {
+      setStatus('Cannot delete node: a line needs at least 2 points.');
+    } else {
+      setStatus('Cannot delete node: a closed path needs at least 3 points.');
+    }
     return;
   }
 
@@ -1518,11 +1718,18 @@ function serializeCurrentSideSvg() {
         `fill-opacity="1"`,
       ];
 
-      if (Array.isArray(path.points) && path.points.length >= 3) {
+      const pathKind = normalizePathKind(path.pathKind);
+      attrs.push(`data-editor-kind="${escapeXml(pathKind)}"`);
+
+      const minPoints = pathKind === 'line' ? 2 : 3;
+      if (Array.isArray(path.points) && path.points.length >= minPoints) {
         attrs.push(`data-editor-points="${escapeXml(serializePoints(path.points))}"`);
       }
-      if (Array.isArray(path.pointModes) && path.pointModes.length >= 3) {
+      if (Array.isArray(path.pointModes) && path.pointModes.length >= minPoints) {
         attrs.push(`data-editor-point-modes="${escapeXml(serializePointModes(path.pointModes))}"`);
+      }
+      if (pathKind === 'line' && Array.isArray(path.vias) && path.vias.length) {
+        attrs.push(`data-editor-vias="${escapeXml(serializeVias(path.vias))}"`);
       }
 
       return `  <path ${attrs.join(' ')} />`;
@@ -1562,9 +1769,11 @@ function parseSideSvg(side, source) {
       category: node.dataset.category || categoryFromNetId(withSidePrefix(node.dataset.netId, side)),
       color: node.dataset.color || node.getAttribute('stroke') || '#ffe05e',
       strokeWidth: node.dataset.strokeWidth || node.getAttribute('stroke-width') || '1',
+      pathKind: node.dataset.editorKind,
       curveMode: node.dataset.curveMode,
       editorPoints: node.dataset.editorPoints,
       editorPointModes: node.dataset.editorPointModes,
+      editorVias: node.dataset.editorVias,
     });
 
     if (candidate) parsed.push(candidate);
@@ -1693,7 +1902,7 @@ function updateDraggedAnchor(point) {
 
   path.points[index] = clampedPoint;
 
-  path.d = pointsToPath(path.points, path.pointModes, true);
+  updatePathGeometry(path);
   renderOverlay();
 }
 
@@ -1710,6 +1919,20 @@ function maybeAppendDrawPoint(point) {
     state.drawPoints.push(tracePoint);
     renderOverlay();
   }
+}
+
+function addViaToDraft(point) {
+  if (normalizePathKind(state.tool) !== 'line') return;
+  if (!state.drawing) return;
+  if (!point) return;
+  const via = [
+    clamp(point[0], 0, CANVAS_SIZE),
+    clamp(point[1], 0, CANVAS_SIZE),
+    LINE_VIA_RADIUS,
+  ];
+  state.drawVias.push(via);
+  renderOverlay();
+  setStatus(`Added via (${state.drawVias.length}) to current line.`);
 }
 
 function bindEvents() {
@@ -1835,7 +2058,8 @@ function bindEvents() {
     if (state.tool !== 'select') return;
 
     const path = activePath();
-    if (!path || !Array.isArray(path.points) || path.points.length < 3) return;
+    const minPoints = normalizePathKind(path?.pathKind) === 'line' ? 2 : 3;
+    if (!path || !Array.isArray(path.points) || path.points.length < minPoints) return;
 
     const point = clientToCanvasPoint(event.clientX, event.clientY);
     if (!point) return;
@@ -1935,12 +2159,14 @@ function bindEvents() {
       return;
     }
 
-    if (state.tool === 'polygon' || state.tool === 'magnet') {
+    if (state.tool === 'polygon' || state.tool === 'line' || state.tool === 'magnet') {
       const point = clientToCanvasPoint(event.clientX, event.clientY);
       if (!point) return;
       const firstPoint = state.tool === 'magnet' ? magnetSnapPoint(point, null) : point;
 
       state.drawPoints = [firstPoint];
+      state.drawVias = [];
+      state.lastPointerPoint = firstPoint;
       state.drawing = {
         pointerId: event.pointerId,
       };
@@ -1952,17 +2178,18 @@ function bindEvents() {
   });
 
   elements.overlay.addEventListener('pointermove', (event) => {
+    const pointer = clientToCanvasPoint(event.clientX, event.clientY);
+    if (pointer) state.lastPointerPoint = pointer;
+
     if (state.anchorDrag && state.anchorDrag.pointerId === event.pointerId) {
-      const point = clientToCanvasPoint(event.clientX, event.clientY);
-      if (!point) return;
-      updateDraggedAnchor(point);
+      if (!pointer) return;
+      updateDraggedAnchor(pointer);
       return;
     }
 
     if (state.drawing && state.drawing.pointerId === event.pointerId) {
-      const point = clientToCanvasPoint(event.clientX, event.clientY);
-      if (!point) return;
-      maybeAppendDrawPoint(point);
+      if (!pointer) return;
+      maybeAppendDrawPoint(pointer);
     }
   });
 
@@ -2051,9 +2278,18 @@ function bindEvents() {
 
     if (key === 'v') setTool('select');
     if (key === 'p') setTool('polygon');
+    if (key === 'l') setTool('line');
     if (key === 'm') setTool('magnet');
     if (key === 'h') setTool('pan');
     if (key === 'b') toggleBezierSelected();
+    if (key === 'i') {
+      if (state.drawing && normalizePathKind(state.tool) === 'line') {
+        event.preventDefault();
+        const fallback = state.drawPoints[state.drawPoints.length - 1] || null;
+        addViaToDraft(state.lastPointerPoint || fallback);
+      }
+      return;
+    }
     if ((key === '[' || key === ']') && !event.metaKey && !event.ctrlKey && !event.altKey) {
       event.preventDefault();
       selectAdjacentPath(key === ']' ? 1 : -1);
@@ -2069,7 +2305,7 @@ function bindEvents() {
 
     if (
       key === 'enter' &&
-      (state.tool === 'polygon' || state.tool === 'magnet') &&
+      (state.tool === 'polygon' || state.tool === 'line' || state.tool === 'magnet') &&
       state.drawPoints.length > 0
     ) {
       event.preventDefault();
@@ -2081,7 +2317,13 @@ function bindEvents() {
       if (!elements.nodeMenu.hidden) {
         hideNodeMenu();
       }
+      if (state.drawing && state.drawPoints.length > 1) {
+        state.drawing = null;
+        commitDrawPath();
+        return;
+      }
       state.drawPoints = [];
+      state.drawVias = [];
       state.drawing = null;
       state.anchorDrag = null;
       renderOverlay();
@@ -2140,7 +2382,7 @@ async function init() {
   setStatus(
     restored
       ? 'Editor ready. Restored draft from local storage.'
-      : 'Editor ready. Drag in Polygon or Magnet mode to draw a new closed net shape.'
+      : 'Editor ready. Use Polygon, Line, or Magnet mode to draw net paths.'
   );
 }
 
