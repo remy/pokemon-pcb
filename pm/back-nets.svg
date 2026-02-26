@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1765 1765">
+  <title>Back side nets</title>
+  <path
+    d="M 320 1040 L 520 980 L 710 900 L 900 850 L 1120 770"
+    data-net-id="back-vbat-rail"
+    data-net-label="VBAT Rail"
+    data-category="vbat"
+    data-color="#9cff75"
+    data-stroke-width="1.2"
+  />
+  <path
+    d="M 450 1160 L 600 1200 L 760 1220 L 980 1250 L 1200 1300"
+    data-net-id="back-gnd-return"
+    data-net-label="GND Return"
+    data-category="gnd"
+    data-color="#7ad4ff"
+    data-stroke-width="1"
+  />
+  <path
+    d="M 970 560 L 1040 640 L 1110 760 L 1180 860 L 1260 980"
+    data-net-id="back-sig-j1-clk"
+    data-net-label="J1 CLK"
+    data-category="signal"
+    data-color="#ffe05e"
+    data-stroke-width="0.9"
+  />
+</svg>

@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PCB Net Path Editor</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0c1018;
+        --panel: #141c2b;
+        --text: #e8eefc;
+        --muted: #a9b6cf;
+        --line: rgba(255, 255, 255, 0.14);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: 320px minmax(0, 1fr);
+        height: 100%;
+      }
+
+      .panel {
+        padding: 14px;
+        border-right: 1px solid var(--line);
+        background: linear-gradient(180deg, #192136, #11182a);
+        overflow: auto;
+      }
+
+      .panel h1 {
+        margin: 0 0 10px;
+        font-size: 1rem;
+      }
+
+      .group {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px;
+        margin-bottom: 10px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .row {
+        display: grid;
+        gap: 4px;
+      }
+
+      .row.inline {
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      label,
+      .label {
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+
+      input,
+      select,
+      button {
+        font: inherit;
+        color: var(--text);
+        background: #0f1627;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 6px 8px;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      .tool-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .tool-grid button.is-active {
+        border-color: #79d3ff;
+        box-shadow: 0 0 0 1px #79d3ff inset;
+      }
+
+      .small {
+        font-size: 0.76rem;
+        color: var(--muted);
+      }
+
+      #status {
+        min-height: 2.2em;
+        font-size: 0.78rem;
+      }
+
+      .viewer {
+        position: relative;
+        overflow: hidden;
+      }
+
+      #viewport {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
+        touch-action: none;
+        background:
+          radial-gradient(circle at 20% 15%, rgba(116, 168, 255, 0.1), transparent 45%),
+          radial-gradient(circle at 80% 85%, rgba(255, 183, 116, 0.12), transparent 45%),
+          #070b12;
+      }
+
+      #scene {
+        position: absolute;
+        inset: 0 auto auto 0;
+        transform-origin: 0 0;
+        width: 1765px;
+        height: 1765px;
+      }
+
+      #base-image,
+      #overlay {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 1765px;
+        height: 1765px;
+      }
+
+      #overlay {
+        overflow: visible;
+      }
+
+      .net-path {
+        stroke-linejoin: round;
+        stroke-linecap: round;
+        vector-effect: non-scaling-stroke;
+      }
+
+      .net-hit {
+        fill: none;
+        stroke: transparent;
+        pointer-events: stroke;
+        vector-effect: non-scaling-stroke;
+      }
+
+      .net-draft {
+        stroke: #ffffff;
+        stroke-width: 1;
+        stroke-dasharray: 4 4;
+        vector-effect: non-scaling-stroke;
+      }
+
+      .net-anchor {
+        fill: #dce8ff;
+        stroke: #0b1220;
+        stroke-width: 0.8;
+        vector-effect: non-scaling-stroke;
+        cursor: move;
+      }
+
+      .net-anchor-hit {
+        fill: transparent;
+        stroke: transparent;
+        pointer-events: all;
+        cursor: move;
+      }
+
+      .net-anchor.is-smooth {
+        fill: #77d6ff;
+      }
+
+      .net-anchor.is-selected {
+        fill: #ffd95e;
+        stroke: #ffffff;
+        stroke-width: 1;
+      }
+
+      .footer-links {
+        position: absolute;
+        right: 10px;
+        bottom: 10px;
+        display: flex;
+        gap: 8px;
+      }
+
+      .footer-links a {
+        color: #d1e7ff;
+      }
+
+      #node-menu {
+        position: fixed;
+        z-index: 1200;
+        min-width: 220px;
+        background: #0f1627;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 8px;
+        box-shadow: 0 14px 26px rgba(0, 0, 0, 0.45);
+      }
+
+      #node-menu[hidden] {
+        display: none;
+      }
+
+      #node-menu-title {
+        margin: 0 0 6px;
+      }
+
+      #node-menu .menu-actions {
+        display: grid;
+        gap: 6px;
+      }
+
+      #node-menu button {
+        text-align: left;
+      }
+
+      @media (max-width: 980px) {
+        .app {
+          grid-template-columns: 1fr;
+          grid-template-rows: auto minmax(0, 1fr);
+        }
+
+        .panel {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+          max-height: 52vh;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="app">
+      <section class="panel">
+        <h1>PCB Net Path Editor</h1>
+
+        <div class="group">
+          <div class="row inline">
+            <div class="row">
+              <label for="side">Side</label>
+              <select id="side">
+                <option value="front">front</option>
+                <option value="back">back</option>
+              </select>
+            </div>
+            <div class="row">
+              <label for="layer-image">Background JPG</label>
+              <select id="layer-image">
+                <option value="1">1.jpg</option>
+                <option value="2">2.jpg</option>
+                <option value="3">3.jpg</option>
+                <option value="4">4.jpg</option>
+                <option value="5">5.jpg</option>
+                <option value="6">6.jpg</option>
+              </select>
+            </div>
+          </div>
+          <div class="row inline">
+            <button id="reload-side" title="Reload side SVG from /pm, replacing unsaved edits for this side">Reload side SVG</button>
+            <button id="import-side" title="Import an SVG file into the current side (replaces unsaved edits for this side)">Import side SVG</button>
+            <button id="export-side" title="Download the current side as an SVG file">Export side SVG</button>
+            <input id="import-side-file" type="file" accept=".svg,image/svg+xml" hidden>
+          </div>
+          <div class="row inline">
+            <button id="zoom-reset" title="Reset zoom and pan to defaults">Reset View</button>
+            <label title="Mirror the canvas horizontally"><input id="mirror" type="checkbox"> Mirror</label>
+          </div>
+          <div class="small">Mouse wheel zoom. Hold <code>space</code> and drag to pan. Middle mouse also pans.</div>
+          <div class="small" id="zoom-readout">Zoom: 1.00x</div>
+        </div>
+
+        <div class="group">
+          <div class="label">Tool</div>
+          <div class="tool-grid">
+            <button data-tool="select" class="is-active" title="Select and inspect one net path">Select (V)</button>
+            <button data-tool="polygon" title="Lasso-draw a closed polygon path for a new net">Polygon (P)</button>
+            <button data-tool="magnet" title="Trace with point snapping to PCB edges from the current layer image">Magnet (M)</button>
+            <button data-tool="pan" title="Pan the canvas by dragging">Pan (H)</button>
+          </div>
+          <div class="small">Polygon mode: press and drag to lasso a shape. Release to create the net path.</div>
+          <div class="small">Magnet mode: drag to trace; points snap to nearby high-contrast PCB features.</div>
+          <div class="small">Select mode: drag anchors to reshape. Right-click path/anchor to add or delete nodes.</div>
+          <div class="small">Click an anchor to select it, then press <code>B</code> to toggle that node between corner/smooth.</div>
+        </div>
+
+        <div class="group">
+          <div class="row">
+            <label for="net-id">Net id</label>
+            <input id="net-id" placeholder="e.g. front-u2-io1">
+          </div>
+          <div class="row">
+            <label for="net-label">Net label (legend)</label>
+            <input id="net-label" placeholder="e.g. U2 IO1">
+          </div>
+          <div class="row inline">
+            <div class="row">
+              <label for="net-category">Category</label>
+              <select id="net-category">
+                <option value="signal">signal</option>
+                <option value="gnd">gnd</option>
+                <option value="vbat">vbat</option>
+                <option value="vcc">vcc</option>
+                <option value="other">other</option>
+              </select>
+            </div>
+            <div class="row">
+              <label for="net-color">Layer color</label>
+              <input id="net-color" type="color" value="#ffe05e">
+            </div>
+          </div>
+          <div class="row">
+            <label for="debug-fill-opacity">Debug fill opacity (editor only)</label>
+            <input id="debug-fill-opacity" type="range" min="0" max="1" step="0.01" value="0.18">
+            <div class="small" id="debug-fill-opacity-readout">0.18</div>
+          </div>
+          <div class="row">
+            <label for="stroke-width">Debug stroke width</label>
+            <input id="stroke-width" type="number" min="0.1" max="20" step="0.1" value="1">
+          </div>
+          <div class="row inline">
+            <button id="apply-meta" title="Apply id/label/category/width to selected path, and apply layer color to all paths on this side">Apply to selected</button>
+            <button id="delete-path" title="Delete the selected path from this side">Delete selected</button>
+            <button id="undo-edit" title="Undo last edit on this side (Ctrl/Cmd+Z)">Undo</button>
+          </div>
+          <div class="row">
+            <button id="toggle-bezier" title="Toggle selected node between corner and Bezier-smooth mode">Toggle Selected Node Curve (B)</button>
+          </div>
+          <div class="row inline">
+            <div class="row">
+              <label for="simplify-epsilon">Simplify tolerance (px)</label>
+              <input id="simplify-epsilon" type="number" min="0.1" max="50" step="0.1" value="3">
+            </div>
+            <div class="row">
+              <label for="smooth-strength">Smooth strength (0-1)</label>
+              <input id="smooth-strength" type="number" min="0.05" max="1" step="0.05" value="0.25">
+            </div>
+          </div>
+          <div class="row inline">
+            <button id="simplify-path" title="Reduce anchor point count on selected path">Simplify Selected Path</button>
+            <button id="smooth-path" title="Smooth selected path geometry">Smooth Selected Path</button>
+          </div>
+          <div class="row inline">
+            <div class="row">
+              <label for="magnet-radius">Magnet radius (px)</label>
+              <input id="magnet-radius" type="number" min="2" max="60" step="1" value="10">
+            </div>
+            <div class="row">
+              <label for="magnet-threshold">Magnet edge threshold</label>
+              <input id="magnet-threshold" type="number" min="1" max="255" step="1" value="35">
+            </div>
+          </div>
+          <div class="row">
+            <label for="magnet-strength">Magnet strength</label>
+            <input id="magnet-strength" type="number" min="0.2" max="5" step="0.1" value="1.6">
+          </div>
+        </div>
+
+        <div class="group">
+          <label for="path-list">Paths on current side</label>
+          <select id="path-list" size="8"></select>
+          <div class="small">Only the selected path is rendered in the canvas.</div>
+          <div class="small">Shortcuts: <code>[</code> previous path, <code>]</code> next path.</div>
+          <div class="small">Undo: <code>Ctrl/Cmd+Z</code> (last 100 edits, per side).</div>
+        </div>
+
+        <div id="status" class="small"></div>
+      </section>
+
+      <section class="viewer">
+        <div id="viewport">
+          <div id="scene">
+            <img id="base-image" alt="PCB base layer image">
+            <svg id="overlay" viewBox="0 0 1765 1765"></svg>
+          </div>
+        </div>
+
+        <div class="footer-links">
+          <a href="./index.html">Back to viewer</a>
+        </div>
+      </section>
+    </div>
+
+    <div id="node-menu" hidden>
+      <p id="node-menu-title" class="small"></p>
+      <div class="menu-actions">
+        <button id="menu-add-node" type="button" title="Insert a new node into the selected path">Add node</button>
+        <button id="menu-delete-node" type="button" title="Delete the selected node">Delete node</button>
+      </div>
+    </div>
+
+    <script type="module" src="editor.js"></script>
+  </body>
+
+</html>
