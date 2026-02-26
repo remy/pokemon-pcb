@@ -23,7 +23,6 @@ const elements = {
   toolButtons: Array.from(document.querySelectorAll('[data-tool]')),
   netId: document.querySelector('#net-id'),
   netLabel: document.querySelector('#net-label'),
-  category: document.querySelector('#net-category'),
   color: document.querySelector('#net-color'),
   debugFillOpacity: document.querySelector('#debug-fill-opacity'),
   debugFillOpacityReadout: document.querySelector('#debug-fill-opacity-readout'),
@@ -131,7 +130,29 @@ function editableTarget(target) {
   return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
 }
 
-function currentLayerColor() {
+function stripSidePrefix(netId) {
+  const raw = String(netId || '').trim();
+  if (!raw.length) return '';
+  return raw.replace(/^(front|back)-/i, '');
+}
+
+function normalizeNetKey(netId) {
+  return stripSidePrefix(netId).trim();
+}
+
+function withSidePrefix(netId, side = state.side) {
+  const base = normalizeNetKey(netId);
+  if (!base.length) return '';
+  const targetSide = side === 'back' ? 'back' : 'front';
+  return `${targetSide}-${base}`;
+}
+
+function categoryFromNetId(netId) {
+  const key = normalizeNetKey(netId);
+  return key || 'uncategorized';
+}
+
+function currentNetColor() {
   const fallback = '#ffe05e';
   const next = normalizeHexColor(elements.color.value, fallback);
   if (elements.color.value !== next) {
@@ -489,7 +510,7 @@ function normalizePath(raw) {
   const d = String(raw?.d || '').trim();
   const netId = String(raw?.netId || '').trim() || `net-${Date.now()}`;
   const netLabel = String(raw?.netLabel || '').trim() || netId;
-  const category = String(raw?.category || 'signal').trim() || 'signal';
+  const category = String(raw?.category || categoryFromNetId(netId)).trim() || categoryFromNetId(netId);
   const color = String(raw?.color || '#ffe05e').trim() || '#ffe05e';
   const strokeWidth = clamp(parseFloat(raw?.strokeWidth) || 1, 0.1, 20);
 
@@ -540,12 +561,13 @@ function normalizePath(raw) {
 }
 
 function cloneSerializablePath(path) {
+  const netId = String(path.netId || '');
   return {
     uid: String(path.uid || ''),
     d: String(path.d || ''),
-    netId: String(path.netId || ''),
+    netId,
     netLabel: String(path.netLabel || ''),
-    category: String(path.category || 'signal'),
+    category: String(path.category || categoryFromNetId(netId)),
     color: String(path.color || '#ffe05e'),
     strokeWidth: clamp(parseFloat(path.strokeWidth) || 1, 0.1, 20),
     points: Array.isArray(path.points)
@@ -598,7 +620,7 @@ function recordUndoSnapshot(label, details = {}) {
     selectedUid: state.selectedUid,
     selectedAnchorIndex: Number.isInteger(state.selectedAnchorIndex) ? state.selectedAnchorIndex : null,
     nextUid: state.nextUid,
-    layerColor: hasLayerColor ? details.layerColor : currentLayerColor(),
+    layerColor: hasLayerColor ? details.layerColor : currentNetColor(),
     paths: state.sides[side].paths.map(cloneSerializablePath),
   };
 
@@ -640,7 +662,7 @@ function undoLastEdit({ announce = true } = {}) {
     if (typeof snapshot.layerColor === 'string') {
       elements.color.value = normalizeHexColor(snapshot.layerColor, '#ffe05e');
     } else {
-      syncLayerColorFromCurrentSide();
+      syncNetColorFromSelection();
     }
 
     state.selectedUid = typeof snapshot.selectedUid === 'string' ? snapshot.selectedUid : null;
@@ -680,7 +702,6 @@ function saveDraft(silent = true) {
       form: {
         netId: elements.netId.value,
         netLabel: elements.netLabel.value,
-        category: elements.category.value,
         color: elements.color.value,
         debugFillOpacity: elements.debugFillOpacity.value,
         strokeWidth: elements.strokeWidth.value,
@@ -732,13 +753,29 @@ function restoreDraft() {
     state.sides.front.paths = frontRaw
       .map(normalizePath)
       .filter(Boolean)
-      .map((path, i) => ({ ...path, uid: path.uid || `p-${i + 1}` }));
+      .map((path, i) => {
+        const netId = withSidePrefix(path.netId, 'front') || `front-net-${Date.now() + i}`;
+        return {
+          ...path,
+        uid: path.uid || `p-${i + 1}`,
+          netId,
+          category: String(path.category || categoryFromNetId(netId)),
+        };
+      });
 
     const offset = state.sides.front.paths.length;
     state.sides.back.paths = backRaw
       .map(normalizePath)
       .filter(Boolean)
-      .map((path, i) => ({ ...path, uid: path.uid || `p-${offset + i + 1}` }));
+      .map((path, i) => {
+        const netId = withSidePrefix(path.netId, 'back') || `back-net-${Date.now() + i}`;
+        return {
+          ...path,
+        uid: path.uid || `p-${offset + i + 1}`,
+          netId,
+          category: String(path.category || categoryFromNetId(netId)),
+        };
+      });
 
     state.sides.front.loaded = true;
     state.sides.back.loaded = true;
@@ -759,9 +796,8 @@ function restoreDraft() {
       : null;
 
     if (data.form && typeof data.form === 'object') {
-      elements.netId.value = String(data.form.netId || '');
+      elements.netId.value = normalizeNetKey(String(data.form.netId || ''));
       elements.netLabel.value = String(data.form.netLabel || '');
-      elements.category.value = String(data.form.category || 'signal');
       elements.color.value = normalizeHexColor(String(data.form.color || '#ffe05e'), '#ffe05e');
       const debugFillOpacity = clamp(parseFloat(data.form.debugFillOpacity) || 0.18, 0, 1);
       state.debugFillOpacity = debugFillOpacity;
@@ -786,33 +822,40 @@ function currentPaths() {
   return state.sides[state.side].paths;
 }
 
-function syncLayerColorFromCurrentSide() {
-  const paths = currentPaths();
-  const firstWithColor = paths.find((path) => typeof path.color === 'string' && path.color.trim().length > 0);
-  if (firstWithColor) {
-    elements.color.value = normalizeHexColor(firstWithColor.color, '#ffe05e');
+function syncNetColorFromSelection() {
+  const path = activePath();
+  if (path && typeof path.color === 'string' && path.color.trim().length > 0) {
+    elements.color.value = normalizeHexColor(path.color, '#ffe05e');
     return;
   }
-  elements.color.value = currentLayerColor();
+  elements.color.value = currentNetColor();
 }
 
-function applyLayerColorToCurrentSide(color, options = {}) {
+function applyColorToNet(netId, color, options = {}) {
   const { save = true, announce = false, recordUndo = false } = options;
-  const previousLayerColor = currentLayerColor();
-  const layerColor = normalizeHexColor(color, '#ffe05e');
-  const paths = currentPaths();
-  const hasChange = paths.some((path) => normalizeHexColor(path.color, layerColor) !== layerColor);
-  if (recordUndo && hasChange) {
-    recordUndoSnapshot('Change layer color', { layerColor: previousLayerColor });
+  const targetNetId = withSidePrefix(netId, state.side);
+  if (!targetNetId) {
+    if (announce) setStatus('Enter a net id first.');
+    return;
   }
-  elements.color.value = layerColor;
+
+  const previousColor = currentNetColor();
+  const nextColor = normalizeHexColor(color, '#ffe05e');
+  const targetNetKey = normalizeNetKey(targetNetId);
+  const paths = currentPaths().filter((path) => normalizeNetKey(path.netId) === targetNetKey);
+  const hasChange = paths.some((path) => normalizeHexColor(path.color, nextColor) !== nextColor);
+  if (recordUndo && hasChange) {
+    recordUndoSnapshot('Change net color', { layerColor: previousColor });
+  }
+
+  elements.color.value = nextColor;
   paths.forEach((path) => {
-    path.color = layerColor;
+    path.color = nextColor;
   });
   renderOverlay();
   if (announce) {
-    const suffix = paths.length ? ` to ${paths.length} path(s)` : ' for new paths';
-    setStatus(`Applied layer color${suffix}.`);
+    const suffix = paths.length ? ` to ${paths.length} path(s)` : '';
+    setStatus(`Applied net color${suffix}.`);
   }
   if (save) saveDraft();
 }
@@ -975,22 +1018,22 @@ function setTool(tool, options = {}) {
 
 function assignFormDefaults(path) {
   if (!path) return;
-  elements.netId.value = path.netId;
+  elements.netId.value = normalizeNetKey(path.netId);
   elements.netLabel.value = path.netLabel;
-  elements.category.value = path.category;
+  elements.color.value = normalizeHexColor(path.color, '#ffe05e');
   elements.strokeWidth.value = String(path.strokeWidth);
 }
 
 function readPathMetaFromForm() {
-  const providedId = elements.netId.value.trim();
-  const netId = providedId || `net-${Date.now()}`;
+  const providedId = normalizeNetKey(elements.netId.value);
+  const netId = withSidePrefix(providedId || `net-${Date.now()}`, state.side);
   const providedLabel = elements.netLabel.value.trim();
 
   return {
     netId,
-    netLabel: providedLabel || netId,
-    category: elements.category.value,
-    color: currentLayerColor(),
+    netLabel: providedLabel || normalizeNetKey(netId),
+    category: categoryFromNetId(netId),
+    color: currentNetColor(),
     strokeWidth: clamp(parseFloat(elements.strokeWidth.value) || 1, 0.1, 20),
   };
 }
@@ -1006,7 +1049,8 @@ function refreshPathList() {
     const hasSmooth = modes.some((mode) => mode === 'smooth');
     const hasCorner = modes.some((mode) => mode !== 'smooth');
     const mode = hasSmooth && hasCorner ? 'mixed' : hasSmooth ? 'smooth' : 'corner';
-    option.textContent = `${path.netLabel} (${path.category}, ${mode})`;
+    const netKey = normalizeNetKey(path.netId) || 'uncategorized';
+    option.textContent = `${path.netLabel} (${netKey}, ${mode})`;
     option.selected = path.uid === state.selectedUid;
     elements.pathList.append(option);
   });
@@ -1196,9 +1240,9 @@ function renderOverlay() {
     const d = pointsToPath(state.drawPoints, null, true);
     if (d) draft.setAttribute('d', d);
     draft.setAttribute('class', 'net-draft');
-    const layerColor = currentLayerColor();
-    draft.setAttribute('stroke', layerColor);
-    draft.setAttribute('fill', layerColor);
+    const netColor = currentNetColor();
+    draft.setAttribute('stroke', netColor);
+    draft.setAttribute('fill', netColor);
     draft.setAttribute('fill-opacity', state.debugFillOpacity.toFixed(2));
     elements.overlay.append(draft);
   } else if (state.drawPoints.length === 1) {
@@ -1238,6 +1282,7 @@ function addPathFromPoints(points) {
   };
 
   currentPaths().push(path);
+  applyColorToNet(meta.netId, meta.color, { save: false, announce: false, recordUndo: false });
   selectPath(path.uid, { save: false });
   setStatus(`Added ${path.netLabel}.`);
   saveDraft();
@@ -1269,11 +1314,11 @@ function applyMetaToSelected() {
   path.netLabel = meta.netLabel;
   path.category = meta.category;
   path.strokeWidth = meta.strokeWidth;
-  applyLayerColorToCurrentSide(meta.color, { save: false, announce: false, recordUndo: false });
+  applyColorToNet(meta.netId, meta.color, { save: false, announce: false, recordUndo: false });
 
   refreshPathList();
   renderOverlay();
-  setStatus(`Updated ${path.netLabel}. Layer color applied to current side.`);
+  setStatus(`Updated ${path.netLabel}. Net color applied to matching paths.`);
   saveDraft();
 }
 
@@ -1461,11 +1506,13 @@ function deleteNodeFromMenu() {
 function serializeCurrentSideSvg() {
   const body = currentPaths()
     .map((path) => {
+      const exportedNetId = withSidePrefix(path.netId, state.side) || `${state.side}-net-${Date.now()}`;
+      const exportedCategory = categoryFromNetId(exportedNetId);
       const attrs = [
         `d="${escapeXml(path.d)}"`,
-        `data-net-id="${escapeXml(path.netId)}"`,
+        `data-net-id="${escapeXml(exportedNetId)}"`,
         `data-net-label="${escapeXml(path.netLabel)}"`,
-        `data-category="${escapeXml(path.category)}"`,
+        `data-category="${escapeXml(exportedCategory)}"`,
         `data-color="${escapeXml(path.color)}"`,
         `fill="${escapeXml(path.color)}"`,
         `fill-opacity="1"`,
@@ -1510,9 +1557,9 @@ function parseSideSvg(side, source) {
     const candidate = normalizePath({
       uid: `p-${state.nextUid++}`,
       d,
-      netId: node.dataset.netId,
+      netId: withSidePrefix(node.dataset.netId, side) || `${side}-net-${Date.now()}`,
       netLabel: node.dataset.netLabel,
-      category: node.dataset.category,
+      category: node.dataset.category || categoryFromNetId(withSidePrefix(node.dataset.netId, side)),
       color: node.dataset.color || node.getAttribute('stroke') || '#ffe05e',
       strokeWidth: node.dataset.strokeWidth || node.getAttribute('stroke-width') || '1',
       curveMode: node.dataset.curveMode,
@@ -1542,7 +1589,7 @@ async function loadSideFromFile(side) {
 
     if (side === state.side) {
       ensureSelectedPath();
-      syncLayerColorFromCurrentSide();
+      syncNetColorFromSelection();
       if (state.selectedUid) assignFormDefaults(activePath());
       refreshPathList();
       renderOverlay();
@@ -1558,7 +1605,7 @@ async function loadSideFromFile(side) {
     if (side === state.side) {
       state.selectedUid = null;
       state.selectedAnchorIndex = null;
-      syncLayerColorFromCurrentSide();
+      syncNetColorFromSelection();
       refreshPathList();
       renderOverlay();
     }
@@ -1576,7 +1623,7 @@ async function importSideFromUploadedFile(file) {
   resetUndoStack(state.side);
 
   ensureSelectedPath();
-  syncLayerColorFromCurrentSide();
+  syncNetColorFromSelection();
   if (state.selectedUid) assignFormDefaults(activePath());
   refreshPathList();
   renderOverlay();
@@ -1673,7 +1720,6 @@ function bindEvents() {
   [
     elements.netId,
     elements.netLabel,
-    elements.category,
     elements.strokeWidth,
     elements.simplifyEpsilon,
     elements.smoothStrength,
@@ -1685,8 +1731,17 @@ function bindEvents() {
     input.addEventListener('input', () => saveDraft());
   });
 
+  elements.netId.addEventListener('change', () => {
+    const targetKey = normalizeNetKey(elements.netId.value);
+    if (!targetKey) return;
+    const match = currentPaths().find((path) => normalizeNetKey(path.netId) === targetKey);
+    if (match && typeof match.color === 'string') {
+      elements.color.value = normalizeHexColor(match.color, '#ffe05e');
+    }
+  });
+
   elements.color.addEventListener('change', () => {
-    applyLayerColorToCurrentSide(elements.color.value, { save: true, announce: true, recordUndo: true });
+    applyColorToNet(elements.netId.value, elements.color.value, { save: true, announce: true, recordUndo: true });
   });
 
   elements.debugFillOpacity.addEventListener('input', () => {
@@ -1707,7 +1762,7 @@ function bindEvents() {
     }
 
     ensureSelectedPath();
-    syncLayerColorFromCurrentSide();
+    syncNetColorFromSelection();
     if (state.selectedUid) assignFormDefaults(activePath());
     refreshPathList();
     renderOverlay();
@@ -2074,7 +2129,7 @@ async function init() {
   }
 
   ensureSelectedPath();
-  syncLayerColorFromCurrentSide();
+  syncNetColorFromSelection();
   setDebugFillOpacity(state.debugFillOpacity, { save: false, announce: false });
   if (state.selectedUid) assignFormDefaults(activePath());
 

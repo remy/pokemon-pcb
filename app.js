@@ -18,6 +18,10 @@ const netState = {
   selectedNetId: null,
   hoverNetId: null,
   loaded: false,
+  hiddenBySide: {
+    front: new Set(),
+    back: new Set(),
+  },
   sides: {
     front: null,
     back: null,
@@ -290,6 +294,59 @@ function clearInteractionClass(kind, netId) {
   }
 }
 
+function isNetVisible(side, netId) {
+  if (!netId) return true;
+  const hidden = netState.hiddenBySide[side];
+  if (!hidden) return true;
+  return !hidden.has(netId);
+}
+
+function applyNetVisibilityForSide(side, netId = null) {
+  const svg = netState.sides[side];
+  if (!svg) return;
+
+  if (netId) {
+    const visible = isNetVisible(side, netId);
+    svg.querySelectorAll(`[data-net-id="${CSS.escape(netId)}"]`).forEach((node) => {
+      node.style.display = visible ? '' : 'none';
+    });
+    return;
+  }
+
+  const visited = new Set();
+  svg.querySelectorAll('[data-net-id]').forEach((node) => {
+    const id = node.dataset.netId;
+    if (!id || visited.has(id)) return;
+    visited.add(id);
+    applyNetVisibilityForSide(side, id);
+  });
+}
+
+function setNetVisibility(side, netId, visible) {
+  if (!netId) return;
+  const hidden = netState.hiddenBySide[side];
+  if (!hidden) return;
+
+  if (visible) {
+    hidden.delete(netId);
+  } else {
+    hidden.add(netId);
+  }
+
+  applyNetVisibilityForSide(side, netId);
+
+  if (!visible && netState.selectedNetId === netId) {
+    clearInteractionClass('selected', netState.selectedNetId);
+    netState.selectedNetId = null;
+  }
+  if (!visible && netState.hoverNetId === netId) {
+    clearInteractionClass('hover', netState.hoverNetId);
+    netState.hoverNetId = null;
+  }
+
+  updateLegend();
+}
+
 function selectNet(netId) {
   if (netState.selectedNetId === netId) {
     clearInteractionClass('selected', netState.selectedNetId);
@@ -370,6 +427,7 @@ async function loadNetOverlay(side) {
   decorateNetPaths(svg);
   scene.append(svg);
   netState.sides[side] = svg;
+  applyNetVisibilityForSide(side);
 }
 
 function addNetsLayer() {
@@ -414,6 +472,7 @@ function gatherVisibleNets() {
       label: path.dataset.netLabel || netId,
       category: path.dataset.category || 'uncategorized',
       color: path.dataset.color || path.getAttribute('stroke') || '#00d9ff',
+      visible: isNetVisible(side, netId),
     });
   });
 
@@ -438,14 +497,34 @@ function updateLegend() {
   }
 
   legendEmpty.hidden = true;
+  const side = currentSide();
   rows.forEach((row) => {
     const li = document.createElement('li');
     li.className = row.netId === netState.selectedNetId ? 'is-selected' : '';
-    li.innerHTML = `
-      <span class="legend-swatch" style="background:${row.color}"></span>
-      <span><strong>${row.label}</strong><br><small>${row.category} · ${row.netId}</small></span>
-    `;
-    li.addEventListener('click', () => selectNet(row.netId));
+    if (!row.visible) li.classList.add('is-hidden');
+
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.className = 'legend-toggle';
+    toggle.checked = row.visible;
+    toggle.title = row.visible ? 'Hide this net' : 'Show this net';
+    toggle.addEventListener('click', (event) => event.stopPropagation());
+    toggle.addEventListener('change', () => {
+      setNetVisibility(side, row.netId, toggle.checked);
+    });
+
+    const swatch = document.createElement('span');
+    swatch.className = 'legend-swatch';
+    swatch.style.background = row.color;
+
+    const text = document.createElement('span');
+    text.innerHTML = `<strong>${row.label}</strong><br><small>${row.category} · ${row.netId}</small>`;
+
+    li.append(toggle, swatch, text);
+    li.addEventListener('click', () => {
+      if (!isNetVisible(side, row.netId)) return;
+      selectNet(row.netId);
+    });
     legendList.append(li);
   });
 }

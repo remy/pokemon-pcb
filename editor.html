@@ -302,27 +302,16 @@
         <div class="group">
           <div class="row">
             <label for="net-id">Net id</label>
-            <input id="net-id" placeholder="e.g. front-u2-io1">
+            <input id="net-id" placeholder="e.g. gnd or vcc_cart">
+            <div class="small">Export prefixes this with <code>front-</code> or <code>back-</code> automatically.</div>
           </div>
           <div class="row">
             <label for="net-label">Net label (legend)</label>
             <input id="net-label" placeholder="e.g. U2 IO1">
           </div>
-          <div class="row inline">
-            <div class="row">
-              <label for="net-category">Category</label>
-              <select id="net-category">
-                <option value="signal">signal</option>
-                <option value="gnd">gnd</option>
-                <option value="vbat">vbat</option>
-                <option value="vcc">vcc</option>
-                <option value="other">other</option>
-              </select>
-            </div>
-            <div class="row">
-              <label for="net-color">Layer color</label>
-              <input id="net-color" type="color" value="#ffe05e">
-            </div>
+          <div class="row">
+            <label for="net-color">Net color</label>
+            <input id="net-color" type="color" value="#ffe05e">
           </div>
           <div class="row">
             <label for="debug-fill-opacity">Debug fill opacity (editor only)</label>
@@ -334,7 +323,7 @@
             <input id="stroke-width" type="number" min="0.1" max="20" step="0.1" value="1">
           </div>
           <div class="row inline">
-            <button id="apply-meta" title="Apply id/label/category/width to selected path, and apply layer color to all paths on this side">Apply</button>
+            <button id="apply-meta" title="Apply id/label/width to selected path, and apply net color to all paths with the same net id">Apply</button>
             <button id="delete-path" title="Delete the selected path from this side">Delete</button>
             <button id="undo-edit" title="Undo last edit on this side (Ctrl/Cmd+Z)">Undo</button>
           </div>

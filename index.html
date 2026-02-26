@@ -148,7 +148,7 @@
 
       #legend-list li {
         display: grid;
-        grid-template-columns: 16px 1fr;
+        grid-template-columns: 16px 16px 1fr;
         gap: 8px;
         align-items: center;
         font-size: 0.85rem;
@@ -159,6 +159,17 @@
 
       #legend-list li.is-selected {
         background: rgba(255, 255, 255, 0.12);
+      }
+
+      #legend-list li.is-hidden {
+        opacity: 0.55;
+      }
+
+      .legend-toggle {
+        margin: 0;
+        width: 14px;
+        height: 14px;
+        accent-color: #7ed8ff;
       }
 
       .legend-swatch {
