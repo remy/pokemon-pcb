@@ -298,11 +298,13 @@
           <div class="tool-grid">
             <button data-tool="select" class="is-active" title="Select and inspect one net path">Select (V)</button>
             <button data-tool="polygon" title="Lasso-draw a closed polygon path for a new net">Polygon (P)</button>
+            <button data-tool="subtract" title="Draw a closed cutout shape and subtract it from the selected area path">Subtract (X)</button>
             <button data-tool="line" title="Draw a freehand line net and drop via circles with I while drawing">Line (L)</button>
             <button data-tool="magnet" title="Trace with point snapping to PCB edges from the current layer image">Magnet (M)</button>
             <button data-tool="pan" title="Pan the canvas by dragging">Pan (H)</button>
           </div>
           <div class="small">Polygon mode: press and drag to lasso a shape. Release to create the net path.</div>
+          <div class="small">Subtract mode: select an area path, then drag to draw a hole cutout inside it (same SVG path, not a separate path).</div>
           <div class="small">Line mode: drag to draw; press <code>I</code> while drawing to add via circles. Press <code>Esc</code> to finish.</div>
           <div class="small">Magnet mode: drag to trace; points snap to nearby high-contrast PCB features.</div>
           <div class="small">Select mode: drag anchors to reshape. Right-click path/anchor to add or delete nodes.</div>
@@ -336,6 +338,7 @@
             <button id="apply-meta" title="Apply id/label/width to selected path, and apply net color to all paths with the same net id">Apply</button>
             <button id="delete-path" title="Delete the selected path from this side">Delete</button>
             <button id="undo-edit" title="Undo last edit on this side (Ctrl/Cmd+Z)">Undo</button>
+            <button id="reset-path-curves" title="Set all nodes on the selected path to corner mode">Reset Curves</button>
           </div>
           <div class="row">
             <button id="toggle-bezier" title="Toggle selected node between corner and Bezier-smooth mode">Toggle Node Curve (B)</button>

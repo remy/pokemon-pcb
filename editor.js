@@ -32,6 +32,7 @@ const elements = {
   deletePath: document.querySelector('#delete-path'),
   undoEdit: document.querySelector('#undo-edit'),
   toggleBezier: document.querySelector('#toggle-bezier'),
+  resetPathCurves: document.querySelector('#reset-path-curves'),
   simplifyEpsilon: document.querySelector('#simplify-epsilon'),
   smoothStrength: document.querySelector('#smooth-strength'),
   simplifyPath: document.querySelector('#simplify-path'),
@@ -64,6 +65,7 @@ const state = {
   nodeMenuState: null,
   selectedUid: null,
   selectedAnchorIndex: null,
+  selectedHoleIndex: null,
   drawPoints: [],
   drawVias: [],
   nextUid: 1,
@@ -182,6 +184,10 @@ function zoomSafe() {
   return Math.max(state.zoom, 0.0001);
 }
 
+function hasActivePointerInteraction() {
+  return !!(state.panning || state.drawing || state.anchorDrag);
+}
+
 function applyAnchorScreenScale(node, x, y) {
   const inv = 1 / zoomSafe();
   const cx = Number(x);
@@ -273,6 +279,53 @@ function serializeVias(vias) {
     })
     .filter(Boolean)
     .join(';');
+}
+
+function normalizeHole(rawHole) {
+  const pointsRaw = Array.isArray(rawHole?.points)
+    ? rawHole.points
+    : Array.isArray(rawHole)
+      ? rawHole
+      : null;
+  if (!pointsRaw) return null;
+
+  const points = pointsRaw
+    .map((pair) => {
+      if (!Array.isArray(pair) || pair.length < 2) return null;
+      const x = parseFloat(pair[0]);
+      const y = parseFloat(pair[1]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      return [clamp(x, 0, CANVAS_SIZE), clamp(y, 0, CANVAS_SIZE)];
+    })
+    .filter(Boolean);
+  if (points.length < 3) return null;
+
+  const pointModes = normalizePointModes(rawHole?.pointModes, points.length, 'corner');
+  return { points, pointModes };
+}
+
+function parseHoles(value) {
+  if (!value || typeof value !== 'string') return [];
+  try {
+    const decoded = JSON.parse(value);
+    if (!Array.isArray(decoded)) return [];
+    return decoded.map(normalizeHole).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function serializeHoles(holes) {
+  if (!Array.isArray(holes) || !holes.length) return '';
+  const normalized = holes
+    .map(normalizeHole)
+    .filter(Boolean)
+    .map((hole) => ({
+      points: hole.points.map((pair) => [Number(pair[0].toFixed(2)), Number(pair[1].toFixed(2))]),
+      pointModes: normalizePointModes(hole.pointModes, hole.points.length, 'corner'),
+    }));
+  if (!normalized.length) return '';
+  return JSON.stringify(normalized);
 }
 
 function parsePointModes(value, expectedLength) {
@@ -569,8 +622,67 @@ function normalizePointModes(pointModes, length, fallbackMode = 'corner') {
 function inferFallbackModeFromPath(rawD, legacyCurveMode) {
   if (legacyCurveMode === 'bezier') return 'smooth';
   if (legacyCurveMode === 'poly') return 'corner';
-  if (typeof rawD === 'string' && /C\s/i.test(rawD)) return 'smooth';
+  // Do not infer "all smooth" from cubic commands alone.
+  // Paths can contain C segments without reliable per-node mode metadata.
   return 'corner';
+}
+
+function modeStats(pointModes) {
+  if (!Array.isArray(pointModes)) return { total: 0, smooth: 0, corner: 0 };
+  const total = pointModes.length;
+  let smooth = 0;
+  pointModes.forEach((mode) => {
+    if (mode === 'smooth') smooth += 1;
+  });
+  return { total, smooth, corner: total - smooth };
+}
+
+function normalizeSelectedHoleIndex(path, holeIndex) {
+  if (!path || !Array.isArray(path.holes)) return null;
+  if (!Number.isInteger(holeIndex)) return null;
+  if (holeIndex < 0 || holeIndex >= path.holes.length) return null;
+  const hole = normalizeHole(path.holes[holeIndex]);
+  if (!hole) return null;
+  path.holes[holeIndex] = hole;
+  return holeIndex;
+}
+
+function getContourData(path, holeIndex = null) {
+  const normalizedHoleIndex = normalizeSelectedHoleIndex(path, holeIndex);
+  if (Number.isInteger(normalizedHoleIndex)) {
+    const hole = path.holes[normalizedHoleIndex];
+    return {
+      points: hole.points,
+      pointModes: hole.pointModes,
+      holeIndex: normalizedHoleIndex,
+      isHole: true,
+    };
+  }
+  return {
+    points: path?.points || [],
+    pointModes: path?.pointModes || [],
+    holeIndex: null,
+    isHole: false,
+  };
+}
+
+function contourName(path, holeIndex = null) {
+  if (!path) return 'path';
+  if (Number.isInteger(normalizeSelectedHoleIndex(path, holeIndex))) {
+    return `${path.netLabel} hole ${holeIndex + 1}`;
+  }
+  return path.netLabel;
+}
+
+function setAllPathModes(path, mode = 'corner') {
+  if (!path || !Array.isArray(path.points) || !path.points.length) return false;
+  const targetMode = mode === 'smooth' ? 'smooth' : 'corner';
+  const nextModes = Array.from({ length: path.points.length }, () => targetMode);
+  const currentModes = normalizePointModes(path.pointModes, path.points.length, 'corner');
+  const changed = currentModes.some((entry, index) => entry !== nextModes[index]);
+  path.pointModes = nextModes;
+  updatePathGeometry(path);
+  return changed;
 }
 
 function normalizePathKind(value) {
@@ -599,7 +711,16 @@ function buildPathD(path) {
   const isLine = normalizePathKind(path.pathKind) === 'line';
   const base = pointsToPath(path.points, path.pointModes, !isLine);
   if (!base) return '';
-  if (!isLine) return base;
+  if (!isLine) {
+    const holeSegments = Array.isArray(path.holes)
+      ? path.holes
+          .map((hole) => normalizeHole(hole))
+          .filter(Boolean)
+          .map((hole) => pointsToPath(hole.points, hole.pointModes, true))
+          .filter(Boolean)
+      : [];
+    return holeSegments.length ? `${base} ${holeSegments.join(' ')}` : base;
+  }
   const viasPath = viaCirclesToPath(path.vias);
   return viasPath ? `${base} ${viasPath}` : base;
 }
@@ -612,6 +733,9 @@ function normalizePath(raw) {
   const color = String(raw?.color || '#ffe05e').trim() || '#ffe05e';
   const strokeWidth = clamp(parseFloat(raw?.strokeWidth) || 1, 0.1, 20);
   const pathKind = normalizePathKind(raw?.pathKind || raw?.editorKind);
+  const holes = Array.isArray(raw?.holes)
+    ? raw.holes.map(normalizeHole).filter(Boolean)
+    : parseHoles(raw?.editorHoles || '');
   const vias = Array.isArray(raw?.vias)
     ? raw.vias
         .map((via) => {
@@ -643,10 +767,33 @@ function normalizePath(raw) {
   if (!points) points = parsePointsWithMin(raw?.editorPoints || '', pathKind === 'line' ? 2 : 3);
   if (!points) points = extractPointsFromSimplePath(d, pathKind === 'line' ? 2 : 3);
 
-  const parsedPointModes = parsePointModes(
-    raw?.editorPointModes || raw?.pointModes || '',
-    points ? points.length : undefined
-  );
+  let parsedPointModes = null;
+  let pointModesFromArray = false;
+  if (Array.isArray(raw?.pointModes)) {
+    pointModesFromArray = true;
+    const expected = points ? points.length : raw.pointModes.length;
+    parsedPointModes = normalizePointModes(raw.pointModes, expected, 'corner');
+  } else {
+    parsedPointModes = parsePointModes(
+      raw?.editorPointModes || raw?.pointModes || '',
+      points ? points.length : undefined
+    );
+  }
+  const editorModeVersion = String(raw?.editorModeVersion || '').trim();
+  const draftVersion = parseInt(raw?.draftVersion, 10);
+  const isLegacyDraft = Number.isFinite(draftVersion) && draftVersion <= 2;
+  const isAllSmoothModes =
+    Array.isArray(parsedPointModes) &&
+    points &&
+    parsedPointModes.length === points.length &&
+    parsedPointModes.length > 0 &&
+    parsedPointModes.every((mode) => mode === 'smooth');
+  const hasLegacyAllSmoothModes =
+    (pointModesFromArray && isLegacyDraft && isAllSmoothModes) ||
+    (!pointModesFromArray && editorModeVersion !== '2' && isAllSmoothModes);
+  if (hasLegacyAllSmoothModes) {
+    parsedPointModes = Array.from({ length: points.length }, () => 'corner');
+  }
   const fallbackMode = inferFallbackModeFromPath(d, raw?.curveMode);
   const pointModes = points
     ? normalizePointModes(parsedPointModes, points.length, fallbackMode)
@@ -654,7 +801,7 @@ function normalizePath(raw) {
 
   let finalD = d;
   if ((!finalD || !finalD.length) && points) {
-    finalD = buildPathD({ points, pointModes, pathKind, vias });
+    finalD = buildPathD({ points, pointModes, pathKind, vias, holes });
   }
   if (!finalD || !finalD.length) return null;
 
@@ -667,6 +814,7 @@ function normalizePath(raw) {
     color,
     strokeWidth,
     pathKind,
+    holes,
     vias,
     points,
     pointModes,
@@ -684,6 +832,15 @@ function cloneSerializablePath(path) {
     color: String(path.color || '#ffe05e'),
     strokeWidth: clamp(parseFloat(path.strokeWidth) || 1, 0.1, 20),
     pathKind: normalizePathKind(path.pathKind),
+    holes: Array.isArray(path.holes)
+      ? path.holes
+          .map(normalizeHole)
+          .filter(Boolean)
+          .map((hole) => ({
+            points: hole.points.map((point) => [Number(point[0]), Number(point[1])]),
+            pointModes: normalizePointModes(hole.pointModes, hole.points.length, 'corner'),
+          }))
+      : [],
     vias: Array.isArray(path.vias)
       ? path.vias
           .map((via) => {
@@ -745,6 +902,7 @@ function recordUndoSnapshot(label, details = {}) {
     pathLabel: details.pathLabel || (path && path.netLabel) || null,
     selectedUid: state.selectedUid,
     selectedAnchorIndex: Number.isInteger(state.selectedAnchorIndex) ? state.selectedAnchorIndex : null,
+    selectedHoleIndex: Number.isInteger(state.selectedHoleIndex) ? state.selectedHoleIndex : null,
     nextUid: state.nextUid,
     layerColor: hasLayerColor ? details.layerColor : currentNetColor(),
     paths: state.sides[side].paths.map(cloneSerializablePath),
@@ -795,6 +953,9 @@ function undoLastEdit({ announce = true } = {}) {
     state.selectedAnchorIndex = Number.isInteger(snapshot.selectedAnchorIndex)
       ? snapshot.selectedAnchorIndex
       : null;
+    state.selectedHoleIndex = Number.isInteger(snapshot.selectedHoleIndex)
+      ? snapshot.selectedHoleIndex
+      : null;
     ensureSelectedPath();
     if (state.selectedUid) assignFormDefaults(activePath());
     refreshPathList();
@@ -814,7 +975,7 @@ function undoLastEdit({ announce = true } = {}) {
 function saveDraft(silent = true) {
   try {
     const snapshot = {
-      version: 2,
+      version: 3,
       side: state.side,
       layerImage: state.layerImage,
       tool: state.tool,
@@ -825,6 +986,7 @@ function saveDraft(silent = true) {
       nextUid: state.nextUid,
       selectedUid: state.selectedUid,
       selectedAnchorIndex: state.selectedAnchorIndex,
+      selectedHoleIndex: state.selectedHoleIndex,
       form: {
         netId: elements.netId.value,
         netLabel: elements.netLabel.value,
@@ -865,7 +1027,7 @@ function restoreDraft() {
     state.layerImage = clamp(parseInt(data.layerImage, 10) || 1, 1, 6);
     elements.layerImage.value = String(state.layerImage);
 
-    const validTools = ['select', 'polygon', 'line', 'magnet', 'pan'];
+    const validTools = ['select', 'polygon', 'subtract', 'line', 'magnet', 'pan'];
     state.tool = validTools.includes(data.tool) ? data.tool : 'select';
 
     state.zoom = clamp(parseFloat(data.zoom) || 1, 0.25, 40);
@@ -875,9 +1037,11 @@ function restoreDraft() {
 
     const frontRaw = Array.isArray(data?.sides?.front) ? data.sides.front : [];
     const backRaw = Array.isArray(data?.sides?.back) ? data.sides.back : [];
+    const draftVersion = parseInt(data?.version, 10);
+    const normalizedDraftVersion = Number.isFinite(draftVersion) ? draftVersion : 1;
 
     state.sides.front.paths = frontRaw
-      .map(normalizePath)
+      .map((entry) => normalizePath({ ...entry, draftVersion: normalizedDraftVersion }))
       .filter(Boolean)
       .map((path, i) => {
         const netId = withSidePrefix(path.netId, 'front') || `front-net-${Date.now() + i}`;
@@ -891,7 +1055,7 @@ function restoreDraft() {
 
     const offset = state.sides.front.paths.length;
     state.sides.back.paths = backRaw
-      .map(normalizePath)
+      .map((entry) => normalizePath({ ...entry, draftVersion: normalizedDraftVersion }))
       .filter(Boolean)
       .map((path, i) => {
         const netId = withSidePrefix(path.netId, 'back') || `back-net-${Date.now() + i}`;
@@ -919,6 +1083,9 @@ function restoreDraft() {
     state.selectedUid = typeof data.selectedUid === 'string' ? data.selectedUid : null;
     state.selectedAnchorIndex = Number.isInteger(data.selectedAnchorIndex)
       ? data.selectedAnchorIndex
+      : null;
+    state.selectedHoleIndex = Number.isInteger(data.selectedHoleIndex)
+      ? data.selectedHoleIndex
       : null;
 
     if (data.form && typeof data.form === 'object') {
@@ -996,21 +1163,26 @@ function ensureSelectedPath() {
   if (!paths.length) {
     state.selectedUid = null;
     state.selectedAnchorIndex = null;
+    state.selectedHoleIndex = null;
     return;
   }
 
   if (!state.selectedUid || !paths.some((entry) => entry.uid === state.selectedUid)) {
     state.selectedUid = paths[0].uid;
     state.selectedAnchorIndex = null;
+    state.selectedHoleIndex = null;
   }
 
   const selectedPath = activePath();
   if (!selectedPath || !Array.isArray(selectedPath.points)) {
     state.selectedAnchorIndex = null;
+    state.selectedHoleIndex = null;
     return;
   }
+  state.selectedHoleIndex = normalizeSelectedHoleIndex(selectedPath, state.selectedHoleIndex);
+  const contour = getContourData(selectedPath, state.selectedHoleIndex);
   if (!Number.isInteger(state.selectedAnchorIndex)) return;
-  if (state.selectedAnchorIndex < 0 || state.selectedAnchorIndex >= selectedPath.points.length) {
+  if (state.selectedAnchorIndex < 0 || state.selectedAnchorIndex >= contour.points.length) {
     state.selectedAnchorIndex = null;
   }
 }
@@ -1020,6 +1192,15 @@ function updatePathGeometry(path) {
   const minPoints = normalizePathKind(path.pathKind) === 'line' ? 2 : 3;
   if (path.points.length < minPoints) return;
   path.pointModes = normalizePointModes(path.pointModes, path.points.length, 'corner');
+  path.holes = Array.isArray(path.holes)
+    ? path.holes
+        .map(normalizeHole)
+        .filter(Boolean)
+        .map((hole) => ({
+          points: hole.points,
+          pointModes: normalizePointModes(hole.pointModes, hole.points.length, 'corner'),
+        }))
+    : [];
   path.d = buildPathD(path);
 }
 
@@ -1048,8 +1229,8 @@ function hideNodeMenu() {
   elements.nodeMenu.hidden = true;
 }
 
-function showNodeMenu({ clientX, clientY, mode, anchorIndex = null, point = null }) {
-  state.nodeMenuState = { mode, anchorIndex, point };
+function showNodeMenu({ clientX, clientY, mode, anchorIndex = null, holeIndex = null, point = null }) {
+  state.nodeMenuState = { mode, anchorIndex, holeIndex, point };
 
   const allowDelete = Number.isInteger(anchorIndex);
   elements.menuAddNode.hidden = false;
@@ -1116,7 +1297,7 @@ function loadBaseImage() {
 
 function setTool(tool, options = {}) {
   const { save = true, announce = true } = options;
-  if (!['select', 'polygon', 'line', 'magnet', 'pan'].includes(tool)) return;
+  if (!['select', 'polygon', 'subtract', 'line', 'magnet', 'pan'].includes(tool)) return;
 
   state.tool = tool;
   state.drawPoints = [];
@@ -1124,6 +1305,7 @@ function setTool(tool, options = {}) {
   state.drawing = null;
   if (tool !== 'select') {
     state.selectedAnchorIndex = null;
+    state.selectedHoleIndex = null;
   }
   hideNodeMenu();
 
@@ -1136,6 +1318,8 @@ function setTool(tool, options = {}) {
   if (announce) {
     if (tool === 'polygon') {
       setStatus('Tool: polygon. Drag on the board to draw a new closed net shape.');
+    } else if (tool === 'subtract') {
+      setStatus('Tool: subtract. Select an area path, drag to draw a cutout, release to subtract.');
     } else if (tool === 'line') {
       setStatus('Tool: line. Drag to draw, press I to drop vias, Esc to finish.');
     } else if (tool === 'magnet') {
@@ -1192,6 +1376,7 @@ function selectPath(uid, options = {}) {
   const { save = true, bringIntoView = true } = options;
   state.selectedUid = uid;
   state.selectedAnchorIndex = null;
+  state.selectedHoleIndex = null;
   const path = activePath();
   if (path) assignFormDefaults(path);
 
@@ -1316,6 +1501,8 @@ function createPathElements(path) {
   } else {
     visual.setAttribute('fill', path.color);
     visual.setAttribute('fill-opacity', state.debugFillOpacity.toFixed(2));
+    visual.setAttribute('fill-rule', 'evenodd');
+    visual.setAttribute('clip-rule', 'evenodd');
   }
   visual.setAttribute('class', 'net-path is-selected');
   visual.dataset.uid = path.uid;
@@ -1329,12 +1516,15 @@ function createPathElements(path) {
   return [visual, hit];
 }
 
-function createAnchorElements(path) {
-  if (!Array.isArray(path.points) || path.points.length < 1) return [];
+function createAnchorsForContour(path, points, pointModes, holeIndex = null) {
+  if (!Array.isArray(points) || points.length < 1) return [];
+  const isHole = Number.isInteger(holeIndex);
 
-  return path.points.flatMap((point, index) => {
+  return points.flatMap((point, index) => {
     const [x, y] = point;
-    const isSelected = state.selectedAnchorIndex === index;
+    const isSelected =
+      state.selectedAnchorIndex === index &&
+      (isHole ? state.selectedHoleIndex === holeIndex : !Number.isInteger(state.selectedHoleIndex));
 
     const hit = document.createElementNS(SVG_NS, 'circle');
     hit.setAttribute('cx', x.toFixed(2));
@@ -1343,6 +1533,9 @@ function createAnchorElements(path) {
     hit.setAttribute('class', 'net-anchor-hit');
     hit.dataset.uid = path.uid;
     hit.dataset.anchorIndex = String(index);
+    if (isHole) {
+      hit.dataset.holeIndex = String(holeIndex);
+    }
     applyAnchorScreenScale(hit, x, y);
 
     const marker = document.createElementNS(SVG_NS, 'circle');
@@ -1350,7 +1543,7 @@ function createAnchorElements(path) {
     marker.setAttribute('cy', y.toFixed(2));
     marker.setAttribute('r', (isSelected ? ANCHOR_MARKER_SELECTED_RADIUS_PX : ANCHOR_MARKER_RADIUS_PX).toFixed(2));
     marker.setAttribute('class', 'net-anchor');
-    if (path.pointModes?.[index] === 'smooth') {
+    if (Array.isArray(pointModes) && pointModes[index] === 'smooth') {
       marker.classList.add('is-smooth');
     }
     if (isSelected) {
@@ -1358,10 +1551,29 @@ function createAnchorElements(path) {
     }
     marker.dataset.uid = path.uid;
     marker.dataset.anchorIndex = String(index);
+    if (isHole) {
+      marker.dataset.holeIndex = String(holeIndex);
+    }
     applyAnchorScreenScale(marker, x, y);
 
     return [hit, marker];
   });
+}
+
+function createAnchorElements(path) {
+  if (!path || !Array.isArray(path.points) || path.points.length < 1) return [];
+  const anchors = [
+    ...createAnchorsForContour(path, path.points, path.pointModes, null),
+  ];
+  if (Array.isArray(path.holes) && path.holes.length) {
+    path.holes.forEach((rawHole, holeIndex) => {
+      const hole = normalizeHole(rawHole);
+      if (!hole) return;
+      path.holes[holeIndex] = hole;
+      anchors.push(...createAnchorsForContour(path, hole.points, hole.pointModes, holeIndex));
+    });
+  }
+  return anchors;
 }
 
 function renderOverlay() {
@@ -1440,6 +1652,7 @@ function addPathFromPoints(points, options = {}) {
     color: meta.color,
     strokeWidth: meta.strokeWidth,
     pathKind: kind,
+    holes: [],
     vias: Array.isArray(vias)
       ? vias
           .map((via) => {
@@ -1464,8 +1677,42 @@ function addPathFromPoints(points, options = {}) {
   saveDraft();
 }
 
+function subtractFromSelectedPath(points) {
+  const path = activePath();
+  if (!path) {
+    setStatus('Select an area path first, then draw subtract shape.');
+    return;
+  }
+  if (normalizePathKind(path.pathKind) === 'line') {
+    setStatus('Subtract is only available on area paths.');
+    return;
+  }
+  if (!Array.isArray(points) || points.length < 3) {
+    setStatus('Subtract draw needs at least 3 points.');
+    return;
+  }
+
+  const hole = normalizeHole({
+    points: points.map((point) => [clamp(point[0], 0, CANVAS_SIZE), clamp(point[1], 0, CANVAS_SIZE)]),
+    pointModes: Array.from({ length: points.length }, () => 'corner'),
+  });
+  if (!hole) {
+    setStatus('Subtract shape is invalid.');
+    return;
+  }
+
+  recordUndoSnapshot('Subtract shape', { path });
+  if (!Array.isArray(path.holes)) path.holes = [];
+  path.holes.push(hole);
+  updatePathGeometry(path);
+  renderOverlay();
+  setStatus(`Subtracted shape from ${path.netLabel}.`);
+  saveDraft();
+}
+
 function commitDrawPath() {
   const isLineTool = normalizePathKind(state.tool) === 'line';
+  const isSubtractTool = state.tool === 'subtract';
   const minPoints = isLineTool ? 2 : 3;
   if (state.drawPoints.length < minPoints) {
     state.drawPoints = [];
@@ -1478,6 +1725,11 @@ function commitDrawPath() {
   const vias = state.drawVias;
   state.drawPoints = [];
   state.drawVias = [];
+  if (isSubtractTool) {
+    subtractFromSelectedPath(points);
+    renderOverlay();
+    return;
+  }
   addPathFromPoints(points, { pathKind: isLineTool ? 'line' : 'area', vias });
   renderOverlay();
 }
@@ -1517,6 +1769,7 @@ function deleteSelectedPath() {
   const [removed] = paths.splice(index, 1);
   state.selectedUid = paths.length ? paths[Math.max(0, index - 1)].uid : null;
   state.selectedAnchorIndex = null;
+  state.selectedHoleIndex = null;
 
   if (state.selectedUid) assignFormDefaults(activePath());
   refreshPathList();
@@ -1532,7 +1785,8 @@ function toggleBezierSelected() {
     return;
   }
 
-  if (!Array.isArray(path.points) || path.points.length < 3 || !Array.isArray(path.pointModes)) {
+  const contour = getContourData(path, state.selectedHoleIndex);
+  if (!Array.isArray(contour.points) || contour.points.length < 3 || !Array.isArray(contour.pointModes)) {
     setStatus('Selected path does not have editable node modes.');
     return;
   }
@@ -1542,20 +1796,51 @@ function toggleBezierSelected() {
     return;
   }
 
-  if (state.selectedAnchorIndex < 0 || state.selectedAnchorIndex >= path.pointModes.length) {
+  if (state.selectedAnchorIndex < 0 || state.selectedAnchorIndex >= contour.pointModes.length) {
     setStatus('Selected node is out of range.');
     return;
   }
 
-  const current = path.pointModes[state.selectedAnchorIndex] === 'smooth' ? 'smooth' : 'corner';
+  const current = contour.pointModes[state.selectedAnchorIndex] === 'smooth' ? 'smooth' : 'corner';
   const next = current === 'smooth' ? 'corner' : 'smooth';
   recordUndoSnapshot('Toggle node curve', { path });
-  path.pointModes[state.selectedAnchorIndex] = next;
+  contour.pointModes[state.selectedAnchorIndex] = next;
+  if (contour.isHole && Number.isInteger(contour.holeIndex)) {
+    path.holes[contour.holeIndex].pointModes = contour.pointModes;
+  } else {
+    path.pointModes = contour.pointModes;
+  }
   updatePathGeometry(path);
 
   refreshPathList();
   renderOverlay();
-  setStatus(`Node ${state.selectedAnchorIndex + 1} on ${path.netLabel}: ${next}.`);
+  setStatus(`Node ${state.selectedAnchorIndex + 1} on ${contourName(path, contour.holeIndex)}: ${next}.`);
+  saveDraft();
+}
+
+function resetSelectedPathCurves() {
+  const path = activePath();
+  if (!path) {
+    setStatus('Select a path first.');
+    return;
+  }
+  if (!Array.isArray(path.points) || !path.points.length) {
+    setStatus('Selected path has no editable nodes.');
+    return;
+  }
+
+  const before = modeStats(normalizePointModes(path.pointModes, path.points.length, 'corner'));
+  if (before.smooth === 0) {
+    setStatus(`Path ${path.netLabel} is already all corner.`);
+    return;
+  }
+
+  recordUndoSnapshot('Reset path curves', { path });
+  setAllPathModes(path, 'corner');
+  refreshPathList();
+  renderOverlay();
+  const after = modeStats(path.pointModes);
+  setStatus(`Reset ${path.netLabel} to corner nodes (${before.smooth}/${before.total} -> ${after.smooth}/${after.total} smooth).`);
   saveDraft();
 }
 
@@ -1565,30 +1850,38 @@ function simplifySelectedPath() {
     setStatus('Select a path first.');
     return;
   }
-  const isLine = normalizePathKind(path.pathKind) === 'line';
-  if (!Array.isArray(path.points) || path.points.length < (isLine ? 3 : 4)) {
-    setStatus('Selected path does not have enough editable points to simplify.');
+  const contour = getContourData(path, state.selectedHoleIndex);
+  const isLine = normalizePathKind(path.pathKind) === 'line' && !contour.isHole;
+  if (!Array.isArray(contour.points) || contour.points.length < (isLine ? 3 : 4)) {
+    setStatus('Selected contour does not have enough editable points to simplify.');
     return;
   }
 
   const epsilon = clamp(parseFloat(elements.simplifyEpsilon.value) || 3, 0.1, 50);
-  const before = path.points.length;
+  const before = contour.points.length;
   const simplified = isLine
-    ? simplifyRdpOpen(path.points, epsilon).map((point) => [point[0], point[1]])
-    : simplifyClosedPolygon(path.points, epsilon);
+    ? simplifyRdpOpen(contour.points, epsilon).map((point) => [point[0], point[1]])
+    : simplifyClosedPolygon(contour.points, epsilon);
   if (simplified.length >= before) {
     setStatus(`No points removed (tolerance ${epsilon.toFixed(1)}).`);
     return;
   }
 
   recordUndoSnapshot('Simplify path', { path });
-  path.points = simplified;
-  path.pointModes = normalizePointModes(path.pointModes, path.points.length, 'corner');
+  contour.points = simplified;
+  contour.pointModes = normalizePointModes(contour.pointModes, contour.points.length, 'corner');
+  if (contour.isHole && Number.isInteger(contour.holeIndex)) {
+    path.holes[contour.holeIndex].points = contour.points;
+    path.holes[contour.holeIndex].pointModes = contour.pointModes;
+  } else {
+    path.points = contour.points;
+    path.pointModes = contour.pointModes;
+  }
   state.selectedAnchorIndex = null;
   updatePathGeometry(path);
   refreshPathList();
   renderOverlay();
-  setStatus(`Simplified ${path.netLabel}: ${before} -> ${path.points.length} points.`);
+  setStatus(`Simplified ${contourName(path, contour.holeIndex)}: ${before} -> ${simplified.length} points.`);
   saveDraft();
 }
 
@@ -1598,19 +1891,26 @@ function smoothSelectedPath() {
     setStatus('Select a path first.');
     return;
   }
-  if (!Array.isArray(path.points) || path.points.length < 3) {
-    setStatus('Selected path has no editable points to smooth.');
+  const contour = getContourData(path, state.selectedHoleIndex);
+  if (!Array.isArray(contour.points) || contour.points.length < 3) {
+    setStatus('Selected contour has no editable points to smooth.');
     return;
   }
 
   const strength = clamp(parseFloat(elements.smoothStrength.value) || 0.25, 0.05, 1);
   recordUndoSnapshot('Smooth path', { path });
-  path.points = normalizePathKind(path.pathKind) === 'line'
-    ? smoothOpenPolyline(path.points, strength)
-    : smoothClosedPolygon(path.points, strength);
+  const isLine = normalizePathKind(path.pathKind) === 'line' && !contour.isHole;
+  contour.points = isLine
+    ? smoothOpenPolyline(contour.points, strength)
+    : smoothClosedPolygon(contour.points, strength);
+  if (contour.isHole && Number.isInteger(contour.holeIndex)) {
+    path.holes[contour.holeIndex].points = contour.points;
+  } else {
+    path.points = contour.points;
+  }
   updatePathGeometry(path);
   renderOverlay();
-  setStatus(`Smoothed ${path.netLabel} (strength ${strength.toFixed(2)}).`);
+  setStatus(`Smoothed ${contourName(path, contour.holeIndex)} (strength ${strength.toFixed(2)}).`);
   saveDraft();
 }
 
@@ -1622,21 +1922,27 @@ function addNodeFromMenu() {
     return;
   }
 
-  const isLine = normalizePathKind(path.pathKind) === 'line';
+  const contour = getContourData(path, menu.holeIndex);
+  if (!Array.isArray(contour.points) || contour.points.length < 2) {
+    hideNodeMenu();
+    return;
+  }
+  const isLine = normalizePathKind(path.pathKind) === 'line' && !contour.isHole;
+  const closed = !isLine;
   let insertPoint = menu.point;
   if (!insertPoint && Number.isInteger(menu.anchorIndex)) {
     const i = menu.anchorIndex;
     const next = isLine
-      ? clamp(i + 1, 0, path.points.length - 1)
-      : (i + 1) % path.points.length;
-    if (isLine && i >= path.points.length - 1 && path.points.length >= 2) {
-      const a = path.points[path.points.length - 2];
-      const b = path.points[path.points.length - 1];
+      ? clamp(i + 1, 0, contour.points.length - 1)
+      : (i + 1) % contour.points.length;
+    if (isLine && i >= contour.points.length - 1 && contour.points.length >= 2) {
+      const a = contour.points[contour.points.length - 2];
+      const b = contour.points[contour.points.length - 1];
       insertPoint = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
     } else {
-    const a = path.points[i];
-    const b = path.points[next];
-    insertPoint = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      const a = contour.points[i];
+      const b = contour.points[next];
+      insertPoint = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
     }
   }
   if (!insertPoint) {
@@ -1646,9 +1952,9 @@ function addNodeFromMenu() {
 
   let segmentIndex;
   if (Number.isInteger(menu.anchorIndex)) {
-    segmentIndex = isLine ? clamp(menu.anchorIndex, 0, path.points.length - 2) : menu.anchorIndex;
+    segmentIndex = isLine ? clamp(menu.anchorIndex, 0, contour.points.length - 2) : menu.anchorIndex;
   } else {
-    segmentIndex = findNearestSegmentIndex(path.points, insertPoint, !isLine);
+    segmentIndex = findNearestSegmentIndex(contour.points, insertPoint, closed);
   }
 
   const clamped = [
@@ -1656,14 +1962,23 @@ function addNodeFromMenu() {
     clamp(insertPoint[1], 0, CANVAS_SIZE),
   ];
   recordUndoSnapshot('Add node', { path });
-  path.pointModes = normalizePointModes(path.pointModes, path.points.length, 'corner');
-  path.points.splice(segmentIndex + 1, 0, clamped);
-  path.pointModes.splice(segmentIndex + 1, 0, 'corner');
+  contour.pointModes = normalizePointModes(contour.pointModes, contour.points.length, 'corner');
+  contour.points.splice(segmentIndex + 1, 0, clamped);
+  contour.pointModes.splice(segmentIndex + 1, 0, 'corner');
+  if (contour.isHole && Number.isInteger(contour.holeIndex)) {
+    path.holes[contour.holeIndex].points = contour.points;
+    path.holes[contour.holeIndex].pointModes = contour.pointModes;
+    state.selectedHoleIndex = contour.holeIndex;
+  } else {
+    path.points = contour.points;
+    path.pointModes = contour.pointModes;
+    state.selectedHoleIndex = null;
+  }
   state.selectedAnchorIndex = segmentIndex + 1;
   updatePathGeometry(path);
   renderOverlay();
   hideNodeMenu();
-  setStatus(`Added node to ${path.netLabel}.`);
+  setStatus(`Added node to ${contourName(path, contour.holeIndex)}.`);
   saveDraft();
 }
 
@@ -1675,8 +1990,13 @@ function deleteNodeFromMenu() {
     return;
   }
 
-  const minPoints = normalizePathKind(path.pathKind) === 'line' ? 2 : 3;
-  if (path.points.length <= minPoints) {
+  const contour = getContourData(path, menu.holeIndex);
+  if (!Array.isArray(contour.points) || !Number.isInteger(menu.anchorIndex)) {
+    hideNodeMenu();
+    return;
+  }
+  const minPoints = normalizePathKind(path.pathKind) === 'line' && !contour.isHole ? 2 : 3;
+  if (contour.points.length <= minPoints) {
     hideNodeMenu();
     if (minPoints === 2) {
       setStatus('Cannot delete node: a line needs at least 2 points.');
@@ -1686,20 +2006,49 @@ function deleteNodeFromMenu() {
     return;
   }
 
-  const index = clamp(menu.anchorIndex, 0, path.points.length - 1);
+  const index = clamp(menu.anchorIndex, 0, contour.points.length - 1);
   recordUndoSnapshot('Delete node', { path });
-  path.points.splice(index, 1);
-  path.pointModes = normalizePointModes(path.pointModes, path.points.length + 1, 'corner');
-  path.pointModes.splice(index, 1);
+  const modes = normalizePointModes(contour.pointModes, contour.points.length, 'corner');
+  const beforeModes = modes.slice();
+  const beforeStats = modeStats(beforeModes);
+  const beforeHasCubic = /\bC\b/i.test(path.d || '');
+  contour.points.splice(index, 1);
+  modes.splice(index, 1);
+  contour.pointModes = modes;
+  if (contour.isHole && Number.isInteger(contour.holeIndex)) {
+    path.holes[contour.holeIndex].points = contour.points;
+    path.holes[contour.holeIndex].pointModes = contour.pointModes;
+    state.selectedHoleIndex = contour.holeIndex;
+  } else {
+    path.points = contour.points;
+    path.pointModes = contour.pointModes;
+    state.selectedHoleIndex = null;
+  }
   if (state.selectedAnchorIndex === index) {
     state.selectedAnchorIndex = null;
   } else if (Number.isInteger(state.selectedAnchorIndex) && state.selectedAnchorIndex > index) {
     state.selectedAnchorIndex -= 1;
   }
   updatePathGeometry(path);
+  const afterStats = modeStats(contour.pointModes);
+  const afterHasCubic = /\bC\b/i.test(path.d || '');
   renderOverlay();
   hideNodeMenu();
-  setStatus(`Deleted node from ${path.netLabel}.`);
+  setStatus(
+    `Deleted node from ${contourName(path, contour.holeIndex)}. Debug smooth ${beforeStats.smooth}/${beforeStats.total} -> ${afterStats.smooth}/${afterStats.total}. Cubic ${beforeHasCubic ? 'yes' : 'no'} -> ${afterHasCubic ? 'yes' : 'no'}.`
+  );
+  console.debug('[delete-node]', {
+    uid: path.uid,
+    netLabel: path.netLabel,
+    contour: contourName(path, contour.holeIndex),
+    deletedIndex: index,
+    beforeStats,
+    afterStats,
+    beforeModes,
+    afterModes: Array.isArray(contour.pointModes) ? contour.pointModes.slice() : [],
+    beforeHasCubic,
+    afterHasCubic,
+  });
   saveDraft();
 }
 
@@ -1720,6 +2069,11 @@ function serializeCurrentSideSvg() {
 
       const pathKind = normalizePathKind(path.pathKind);
       attrs.push(`data-editor-kind="${escapeXml(pathKind)}"`);
+      attrs.push('data-editor-mode-version="2"');
+      if (pathKind !== 'line') {
+        attrs.push('fill-rule="evenodd"');
+        attrs.push('clip-rule="evenodd"');
+      }
 
       const minPoints = pathKind === 'line' ? 2 : 3;
       if (Array.isArray(path.points) && path.points.length >= minPoints) {
@@ -1730,6 +2084,9 @@ function serializeCurrentSideSvg() {
       }
       if (pathKind === 'line' && Array.isArray(path.vias) && path.vias.length) {
         attrs.push(`data-editor-vias="${escapeXml(serializeVias(path.vias))}"`);
+      }
+      if (pathKind !== 'line' && Array.isArray(path.holes) && path.holes.length) {
+        attrs.push(`data-editor-holes="${escapeXml(serializeHoles(path.holes))}"`);
       }
 
       return `  <path ${attrs.join(' ')} />`;
@@ -1770,10 +2127,12 @@ function parseSideSvg(side, source) {
       color: node.dataset.color || node.getAttribute('stroke') || '#ffe05e',
       strokeWidth: node.dataset.strokeWidth || node.getAttribute('stroke-width') || '1',
       pathKind: node.dataset.editorKind,
+      editorModeVersion: node.dataset.editorModeVersion,
       curveMode: node.dataset.curveMode,
       editorPoints: node.dataset.editorPoints,
       editorPointModes: node.dataset.editorPointModes,
       editorVias: node.dataset.editorVias,
+      editorHoles: node.dataset.editorHoles,
     });
 
     if (candidate) parsed.push(candidate);
@@ -1814,6 +2173,7 @@ async function loadSideFromFile(side) {
     if (side === state.side) {
       state.selectedUid = null;
       state.selectedAnchorIndex = null;
+      state.selectedHoleIndex = null;
       syncNetColorFromSelection();
       refreshPathList();
       renderOverlay();
@@ -1885,14 +2245,17 @@ function updateDraggedAnchor(point) {
   if (!path || path.uid !== state.anchorDrag.uid || !Array.isArray(path.points)) return;
 
   const index = state.anchorDrag.index;
-  if (!Number.isInteger(index) || !path.points[index]) return;
+  const holeIndex = normalizeSelectedHoleIndex(path, state.anchorDrag.holeIndex);
+  const contour = getContourData(path, holeIndex);
+  if (!Number.isInteger(index) || !Array.isArray(contour.points) || !contour.points[index]) return;
   state.selectedAnchorIndex = index;
+  state.selectedHoleIndex = contour.holeIndex;
 
   const clampedPoint = [
     clamp(point[0], 0, CANVAS_SIZE),
     clamp(point[1], 0, CANVAS_SIZE),
   ];
-  const currentPoint = path.points[index];
+  const currentPoint = contour.points[index];
   if (pointDistance2(currentPoint, clampedPoint) < 0.0001) return;
 
   if (!state.anchorDrag.undoRecorded) {
@@ -1900,7 +2263,18 @@ function updateDraggedAnchor(point) {
     state.anchorDrag.undoRecorded = true;
   }
 
-  path.points[index] = clampedPoint;
+  contour.points[index] = clampedPoint;
+  if (contour.isHole && Number.isInteger(contour.holeIndex)) {
+    if (!Array.isArray(path.holes)) path.holes = [];
+    if (!path.holes[contour.holeIndex]) {
+      path.holes[contour.holeIndex] = { points: [], pointModes: [] };
+    }
+    path.holes[contour.holeIndex].points = contour.points;
+    path.holes[contour.holeIndex].pointModes = contour.pointModes;
+  } else {
+    path.points = contour.points;
+    path.pointModes = contour.pointModes;
+  }
 
   updatePathGeometry(path);
   renderOverlay();
@@ -2044,6 +2418,7 @@ function bindEvents() {
     undoLastEdit({ announce: true });
   });
   elements.toggleBezier.addEventListener('click', toggleBezierSelected);
+  elements.resetPathCurves.addEventListener('click', resetSelectedPathCurves);
   elements.simplifyPath.addEventListener('click', simplifySelectedPath);
   elements.smoothPath.addEventListener('click', smoothSelectedPath);
   elements.menuAddNode.addEventListener('click', addNodeFromMenu);
@@ -2058,8 +2433,7 @@ function bindEvents() {
     if (state.tool !== 'select') return;
 
     const path = activePath();
-    const minPoints = normalizePathKind(path?.pathKind) === 'line' ? 2 : 3;
-    if (!path || !Array.isArray(path.points) || path.points.length < minPoints) return;
+    if (!path || !Array.isArray(path.points)) return;
 
     const point = clientToCanvasPoint(event.clientX, event.clientY);
     if (!point) return;
@@ -2068,8 +2442,11 @@ function bindEvents() {
     if (anchor && anchor.dataset.uid === path.uid) {
       event.preventDefault();
       const anchorIndex = parseInt(anchor.dataset.anchorIndex, 10);
+      const holeIndexRaw = parseInt(anchor.dataset.holeIndex, 10);
+      const holeIndex = Number.isInteger(holeIndexRaw) ? holeIndexRaw : null;
       if (Number.isInteger(anchorIndex)) {
         state.selectedAnchorIndex = anchorIndex;
+        state.selectedHoleIndex = normalizeSelectedHoleIndex(path, holeIndex);
         renderOverlay();
         saveDraft();
       }
@@ -2078,6 +2455,7 @@ function bindEvents() {
         clientY: event.clientY,
         mode: 'anchor',
         anchorIndex: Number.isInteger(anchorIndex) ? anchorIndex : null,
+        holeIndex: state.selectedHoleIndex,
         point,
       });
       return;
@@ -2090,6 +2468,7 @@ function bindEvents() {
         clientX: event.clientX,
         clientY: event.clientY,
         mode: 'path',
+        holeIndex: state.selectedHoleIndex,
         point,
       });
     }
@@ -2107,8 +2486,12 @@ function bindEvents() {
     if (anchor) {
       if (anchor.dataset.uid !== state.selectedUid) return;
       const anchorIndex = parseInt(anchor.dataset.anchorIndex, 10);
+      const holeIndexRaw = parseInt(anchor.dataset.holeIndex, 10);
+      const holeIndex = Number.isInteger(holeIndexRaw) ? holeIndexRaw : null;
       if (Number.isInteger(anchorIndex)) {
         state.selectedAnchorIndex = anchorIndex;
+        const selectedPath = activePath();
+        state.selectedHoleIndex = normalizeSelectedHoleIndex(selectedPath, holeIndex);
         renderOverlay();
         saveDraft();
       }
@@ -2118,12 +2501,14 @@ function bindEvents() {
     const hit = event.target.closest('.net-hit[data-uid]');
     if (hit) {
       state.selectedAnchorIndex = null;
+      state.selectedHoleIndex = null;
       selectPath(hit.dataset.uid);
       return;
     }
 
     state.selectedUid = null;
     state.selectedAnchorIndex = null;
+    state.selectedHoleIndex = null;
     refreshPathList();
     renderOverlay();
     saveDraft();
@@ -2140,13 +2525,17 @@ function bindEvents() {
     if (anchorTarget && state.tool === 'select') {
       const uid = anchorTarget.dataset.uid;
       const index = parseInt(anchorTarget.dataset.anchorIndex, 10);
+      const holeIndexRaw = parseInt(anchorTarget.dataset.holeIndex, 10);
+      const holeIndex = Number.isInteger(holeIndexRaw) ? holeIndexRaw : null;
       const path = activePath();
 
       if (path && path.uid === uid && Number.isInteger(index)) {
         state.selectedAnchorIndex = index;
+        state.selectedHoleIndex = normalizeSelectedHoleIndex(path, holeIndex);
         state.anchorDrag = {
           uid,
           index,
+          holeIndex: state.selectedHoleIndex,
           pointerId: event.pointerId,
           undoRecorded: false,
         };
@@ -2159,7 +2548,18 @@ function bindEvents() {
       return;
     }
 
-    if (state.tool === 'polygon' || state.tool === 'line' || state.tool === 'magnet') {
+    if (state.tool === 'polygon' || state.tool === 'subtract' || state.tool === 'line' || state.tool === 'magnet') {
+      if (state.tool === 'subtract') {
+        const selectedPath = activePath();
+        if (!selectedPath) {
+          setStatus('Select an area path first, then draw subtract shape.');
+          return;
+        }
+        if (normalizePathKind(selectedPath.pathKind) === 'line') {
+          setStatus('Subtract is only available on area paths.');
+          return;
+        }
+      }
       const point = clientToCanvasPoint(event.clientX, event.clientY);
       if (!point) return;
       const firstPoint = state.tool === 'magnet' ? magnetSnapPoint(point, null) : point;
@@ -2218,6 +2618,10 @@ function bindEvents() {
   elements.viewport.addEventListener(
     'wheel',
     (event) => {
+      if (hasActivePointerInteraction() || event.buttons) {
+        event.preventDefault();
+        return;
+      }
       event.preventDefault();
       const scaleStep = Math.exp(-event.deltaY * 0.0016);
       zoomAt(event.clientX, event.clientY, state.zoom * scaleStep);
@@ -2230,6 +2634,7 @@ function bindEvents() {
     hideNodeMenu();
     const shouldPan = state.tool === 'pan' || state.isSpaceDown || event.button === 1;
     if (!shouldPan) return;
+    event.preventDefault();
 
     state.panning = {
       pointerId: event.pointerId,
@@ -2240,6 +2645,18 @@ function bindEvents() {
     };
 
     elements.viewport.setPointerCapture(event.pointerId);
+  });
+
+  elements.viewport.addEventListener('mousedown', (event) => {
+    if (event.button === 1) {
+      event.preventDefault();
+    }
+  });
+
+  elements.viewport.addEventListener('auxclick', (event) => {
+    if (event.button === 1) {
+      event.preventDefault();
+    }
   });
 
   elements.viewport.addEventListener('pointermove', (event) => {
@@ -2260,6 +2677,12 @@ function bindEvents() {
     saveDraft();
   });
 
+  elements.viewport.addEventListener('pointercancel', (event) => {
+    if (!state.panning || state.panning.pointerId !== event.pointerId) return;
+    state.panning = null;
+    elements.viewport.releasePointerCapture(event.pointerId);
+  });
+
   document.addEventListener('keydown', (event) => {
     if (editableTarget(event.target)) return;
 
@@ -2278,6 +2701,7 @@ function bindEvents() {
 
     if (key === 'v') setTool('select');
     if (key === 'p') setTool('polygon');
+    if (key === 'x') setTool('subtract');
     if (key === 'l') setTool('line');
     if (key === 'm') setTool('magnet');
     if (key === 'h') setTool('pan');
@@ -2305,7 +2729,7 @@ function bindEvents() {
 
     if (
       key === 'enter' &&
-      (state.tool === 'polygon' || state.tool === 'line' || state.tool === 'magnet') &&
+      (state.tool === 'polygon' || state.tool === 'subtract' || state.tool === 'line' || state.tool === 'magnet') &&
       state.drawPoints.length > 0
     ) {
       event.preventDefault();
@@ -2331,12 +2755,14 @@ function bindEvents() {
     }
 
     if ((key === '+' || key === '=') && !event.metaKey && !event.ctrlKey) {
+      if (hasActivePointerInteraction()) return;
       event.preventDefault();
       zoomAt(window.innerWidth / 2, window.innerHeight / 2, state.zoom * 1.15);
       saveDraft();
     }
 
     if (key === '-' && !event.metaKey && !event.ctrlKey) {
+      if (hasActivePointerInteraction()) return;
       event.preventDefault();
       zoomAt(window.innerWidth / 2, window.innerHeight / 2, state.zoom / 1.15);
       saveDraft();
@@ -2382,7 +2808,7 @@ async function init() {
   setStatus(
     restored
       ? 'Editor ready. Restored draft from local storage.'
-      : 'Editor ready. Use Polygon, Line, or Magnet mode to draw net paths.'
+      : 'Editor ready. Use Polygon, Subtract, Line, or Magnet mode to draw net paths.'
   );
 }
 
