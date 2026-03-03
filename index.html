@@ -17,6 +17,10 @@
         font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
       }
 
+      * {
+        user-select: none;
+      }
+
       body {
         background: #0d1118;
         color: #e8eefc;
@@ -119,31 +123,14 @@
         right: 140px;
       }
 
-      #legend {
-        position: absolute;
-        right: 12px;
-        top: 12px;
-        width: min(360px, calc(100vw - 24px));
-        max-height: calc(100vh - 96px);
-        overflow: auto;
-        z-index: 100;
-        background: rgba(5, 10, 18, 0.72);
-        border: 1px solid rgba(255, 255, 255, 0.15);
-        border-radius: 10px;
-        padding: 10px;
-      }
-
-      #legend h2 {
-        font-size: 0.95rem;
-        margin: 0 0 8px;
-      }
-
       #legend-list {
-        margin: 0;
+        margin: 6px 0 0;
         padding: 0;
         list-style: none;
         display: grid;
         gap: 4px;
+        max-height: min(40vh, 320px);
+        overflow: auto;
       }
 
       #legend-list li {
@@ -182,6 +169,7 @@
       #legend-empty {
         font-size: 0.85rem;
         color: #b7c2d8;
+        margin-top: 4px;
       }
     </style>
   </head>
@@ -192,15 +180,13 @@
         <br><input class="allow" type="range" value="5" min="0" max="5" id="layer">
       <li><button class="allow" id="flip">flip</button> <button class="allow" id="reset-view">reset view</button>
       <li>Wheel to zoom. Hold <code>space</code> and drag (or middle mouse) to pan.
+      <li>Double-click canvas to jump to the opposite-side paired layer.
       <li class="allow">Layer opacity<br><input type="range" value="50" min="0" max="100" id="opacity">
-      <li class="allow">Click net lines to highlight
+      <li class="allow">
+        Net lines (click to highlight)
+        <p id="legend-empty">Loading net paths...</p>
+        <ul id="legend-list"></ul>
     </ul>
-
-    <aside id="legend" aria-live="polite">
-      <h2>Visible Nets</h2>
-      <p id="legend-empty">Loading net paths...</p>
-      <ul id="legend-list"></ul>
-    </aside>
 
     <main>
       <div id="viewport">

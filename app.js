@@ -7,12 +7,10 @@ const CANVAS_SIZE = 1765;
 
 const viewport = document.querySelector('#viewport');
 const scene = document.querySelector('#scene');
-const help = document.querySelector('#help');
 const layerSelect = document.querySelector('#layer');
 const legendList = document.querySelector('#legend-list');
 const legendEmpty = document.querySelector('#legend-empty');
 
-const overlays = {};
 const layers = {};
 const netState = {
   selectedNetId: null,
@@ -26,6 +24,10 @@ const netState = {
     front: null,
     back: null,
   },
+};
+
+const interactionState = {
+  pendingNetSelectTimer: null,
 };
 
 const viewState = {
@@ -113,11 +115,20 @@ function currentSide() {
 
 function moveTo(i) {
   if (i < 0 || i >= pm.length) return;
+  cancelPendingNetSelection();
   layerSelect.value = i;
   pm[visible].hidden = true;
   visible = i;
   pm[visible].hidden = false;
   updateAllLayers();
+}
+
+function pairedLayerIndex(i) {
+  if (!Number.isInteger(i)) return null;
+  if (!pm.length) return null;
+  const target = pm.length - 1 - i;
+  if (target < 0 || target >= pm.length) return null;
+  return target;
 }
 
 function handleKey(key) {
@@ -204,68 +215,21 @@ viewport.addEventListener('pointercancel', (e) => {
   viewport.releasePointerCapture(e.pointerId);
 });
 
+viewport.addEventListener('dblclick', (e) => {
+  if (viewState.panning) return;
+  if (editableTarget(e.target)) return;
+  cancelPendingNetSelection();
+  const target = pairedLayerIndex(visible);
+  if (!Number.isInteger(target) || target === visible) return;
+  e.preventDefault();
+  moveTo(target);
+});
+
 function updateAllLayers() {
   for (const l in layers) {
     layers[l].update();
   }
   updateLegend();
-}
-
-function createToggle(id, label) {
-  const wrapper = document.createElement('li');
-  wrapper.className = 'allow';
-  const checkbox = document.createElement('input');
-  checkbox.type = 'checkbox';
-  checkbox.id = id;
-  checkbox.name = id;
-
-  const text = document.createElement('label');
-  text.textContent = label;
-  text.setAttribute('for', id);
-
-  wrapper.append(checkbox);
-  wrapper.append(text);
-  help.append(wrapper);
-
-  return checkbox;
-}
-
-function addImageLayer(val, text) {
-  const front = new Image();
-  front.src = `./pm/front-${val}.png`;
-  front.hidden = true;
-  front.className = 'layer';
-  scene.append(front);
-
-  const back = new Image();
-  back.src = `./pm/back-${val}.png`;
-  back.hidden = true;
-  back.className = 'layer';
-  scene.append(back);
-
-  overlays[val] = { front, back };
-
-  const state = createToggle(val, text || val);
-
-  layers[val] = {
-    front,
-    back,
-    state,
-    update() {
-      const showFront = currentSide() === 'front';
-      front.hidden = true;
-      back.hidden = true;
-      if (state.checked) {
-        if (showFront) {
-          front.hidden = false;
-        } else {
-          back.hidden = false;
-        }
-      }
-    },
-  };
-
-  state.onchange = () => layers[val].update();
 }
 
 function setPathInteractionClass(kind, netId) {
@@ -361,6 +325,20 @@ function selectNet(netId) {
   updateLegend();
 }
 
+function cancelPendingNetSelection() {
+  if (interactionState.pendingNetSelectTimer === null) return;
+  clearTimeout(interactionState.pendingNetSelectTimer);
+  interactionState.pendingNetSelectTimer = null;
+}
+
+function queueNetSelection(netId) {
+  cancelPendingNetSelection();
+  interactionState.pendingNetSelectTimer = setTimeout(() => {
+    interactionState.pendingNetSelectTimer = null;
+    selectNet(netId);
+  }, 220);
+}
+
 function setHover(netId) {
   if (netState.hoverNetId === netId) return;
   clearInteractionClass('hover', netState.hoverNetId);
@@ -405,7 +383,8 @@ function decorateNetPaths(svg) {
   svg.addEventListener('click', (event) => {
     const hit = event.target.closest('.net-hit[data-net-id]');
     if (!hit) return;
-    selectNet(hit.dataset.netId);
+    if (event.detail > 1) return;
+    queueNetSelection(hit.dataset.netId);
   });
 }
 
@@ -431,11 +410,8 @@ async function loadNetOverlay(side) {
 }
 
 function addNetsLayer() {
-  const state = createToggle('nets', 'nets (svg)');
-  state.checked = true;
-
   layers.nets = {
-    state,
+    enabled: true,
     update() {
       const showFront = currentSide() === 'front';
       const front = netState.sides.front;
@@ -443,7 +419,7 @@ function addNetsLayer() {
       setNetOverlayVisible(front, false);
       setNetOverlayVisible(back, false);
 
-      if (!state.checked) {
+      if (!this.enabled) {
         updateLegend();
         return;
       }
@@ -453,14 +429,12 @@ function addNetsLayer() {
       updateLegend();
     },
   };
-
-  state.onchange = () => layers.nets.update();
 }
 
 function gatherVisibleNets() {
   const side = currentSide();
   const svg = netState.sides[side];
-  if (!svg || layers.nets?.state?.checked === false) return [];
+  if (!svg || layers.nets?.enabled === false) return [];
 
   const nets = new Map();
   svg.querySelectorAll('.net-path[data-net-id]').forEach((path) => {
@@ -536,10 +510,6 @@ const pm = Array.from({ length: 6 }, (_, i) => {
   scene.append(img);
   visible = i;
   return img;
-});
-
-[['gnd'], ['vbat', 'vbat 1.5v'], ['vcc', 'vcc 3v']].forEach(([val, label]) => {
-  addImageLayer(val, label);
 });
 
 addNetsLayer();
