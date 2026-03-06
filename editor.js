@@ -10,10 +10,11 @@ const ANCHOR_MARKER_SELECTED_RADIUS_PX = 3.2;
 const elements = {
   side: document.querySelector('#side'),
   layerImage: document.querySelector('#layer-image'),
-  reloadSide: document.querySelector('#reload-side'),
+  newProject: document.querySelector('#new-project'),
   importSide: document.querySelector('#import-side'),
   importSideFile: document.querySelector('#import-side-file'),
   exportSide: document.querySelector('#export-side'),
+  openGroups: document.querySelector('#open-groups'),
   zoomReset: document.querySelector('#zoom-reset'),
   mirror: document.querySelector('#mirror'),
   zoomReadout: document.querySelector('#zoom-readout'),
@@ -30,6 +31,7 @@ const elements = {
   strokeWidth: document.querySelector('#stroke-width'),
   applyMeta: document.querySelector('#apply-meta'),
   deletePath: document.querySelector('#delete-path'),
+  mergePaths: document.querySelector('#merge-paths'),
   undoEdit: document.querySelector('#undo-edit'),
   toggleBezier: document.querySelector('#toggle-bezier'),
   resetPathCurves: document.querySelector('#reset-path-curves'),
@@ -41,11 +43,28 @@ const elements = {
   magnetThreshold: document.querySelector('#magnet-threshold'),
   magnetStrength: document.querySelector('#magnet-strength'),
   pathList: document.querySelector('#path-list'),
+  toolsHelpToggle: document.querySelector('#tools-help-toggle'),
+  pathsHelpToggle: document.querySelector('#paths-help-toggle'),
+  toolsHelp: document.querySelector('#tools-help'),
+  pathsHelp: document.querySelector('#paths-help'),
   nodeMenu: document.querySelector('#node-menu'),
   nodeMenuTitle: document.querySelector('#node-menu-title'),
   menuAddNode: document.querySelector('#menu-add-node'),
   menuDeleteNode: document.querySelector('#menu-delete-node'),
   status: document.querySelector('#status'),
+  groupsModal: document.querySelector('#groups-modal'),
+  groupsClose: document.querySelector('#groups-close'),
+  groupsList: document.querySelector('#groups-list'),
+  groupCreate: document.querySelector('#group-create'),
+  groupDelete: document.querySelector('#group-delete'),
+  groupSave: document.querySelector('#group-save'),
+  groupName: document.querySelector('#group-name'),
+  groupOrder: document.querySelector('#group-order'),
+  groupDefaultOn: document.querySelector('#group-default-on'),
+  groupNetAvailable: document.querySelector('#group-net-available'),
+  groupNetMembers: document.querySelector('#group-net-members'),
+  groupAddNet: document.querySelector('#group-add-net'),
+  groupRemoveNet: document.querySelector('#group-remove-net'),
 };
 
 const state = {
@@ -64,11 +83,19 @@ const state = {
   suppressOverlayClick: false,
   nodeMenuState: null,
   selectedUid: null,
+  selectedUids: [],
+  selectedGroupId: null,
   selectedAnchorIndex: null,
   selectedHoleIndex: null,
   drawPoints: [],
   drawVias: [],
   nextUid: 1,
+  nextGroupUid: 1,
+  groups: [],
+  helpPanels: {
+    tools: false,
+    paths: false,
+  },
   isApplyingUndo: false,
   undo: {
     front: [],
@@ -79,6 +106,12 @@ const state = {
     ctx: null,
     imageData: null,
     edgeMap: null,
+    width: CANVAS_SIZE,
+    height: CANVAS_SIZE,
+  },
+  mergeRaster: {
+    canvas: document.createElement('canvas'),
+    ctx: null,
     width: CANVAS_SIZE,
     height: CANVAS_SIZE,
   },
@@ -97,9 +130,36 @@ const state = {
 state.raster.canvas.width = CANVAS_SIZE;
 state.raster.canvas.height = CANVAS_SIZE;
 state.raster.ctx = state.raster.canvas.getContext('2d', { willReadFrequently: true });
+state.mergeRaster.canvas.width = CANVAS_SIZE;
+state.mergeRaster.canvas.height = CANVAS_SIZE;
+state.mergeRaster.ctx = state.mergeRaster.canvas.getContext('2d', { willReadFrequently: true });
 
 function setStatus(text) {
   elements.status.textContent = text;
+}
+
+function normalizeHelpPanelState(raw) {
+  return {
+    tools: raw?.tools === true,
+    paths: raw?.paths === true,
+  };
+}
+
+function applyHelpPanels() {
+  const toolsVisible = state.helpPanels.tools === true;
+  const pathsVisible = state.helpPanels.paths === true;
+
+  if (elements.toolsHelp) elements.toolsHelp.hidden = !toolsVisible;
+  if (elements.pathsHelp) elements.pathsHelp.hidden = !pathsVisible;
+  if (elements.toolsHelpToggle) elements.toolsHelpToggle.setAttribute('aria-pressed', toolsVisible ? 'true' : 'false');
+  if (elements.pathsHelpToggle) elements.pathsHelpToggle.setAttribute('aria-pressed', pathsVisible ? 'true' : 'false');
+}
+
+function toggleHelpPanel(panel) {
+  if (panel !== 'tools' && panel !== 'paths') return;
+  state.helpPanels[panel] = !state.helpPanels[panel];
+  applyHelpPanels();
+  saveDraft();
 }
 
 function clamp(value, min, max) {
@@ -133,6 +193,11 @@ function editableTarget(target) {
   if (target.isContentEditable) return true;
   if (target.closest('[contenteditable="true"]')) return true;
   return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
+}
+
+function pathListTarget(target) {
+  if (!(target instanceof HTMLElement) || !elements.pathList) return false;
+  return target === elements.pathList || target.closest('#path-list') === elements.pathList;
 }
 
 function stripSidePrefix(netId) {
@@ -372,6 +437,51 @@ function extractPointsFromSimplePath(d, minPoints = 3) {
   return points.length >= required ? points : null;
 }
 
+function contourArea(points) {
+  if (!Array.isArray(points) || points.length < 3) return 0;
+  let area = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+    area += current[0] * next[1] - next[0] * current[1];
+  }
+  return Math.abs(area * 0.5);
+}
+
+function extractEditableContourFromPathD(d, minPoints = 3) {
+  if (!d) return null;
+  const subpaths = (String(d).match(/[Mm][^Mm]*/g) || []).map((segment) => segment.trim()).filter(Boolean);
+  const candidates = subpaths.length ? subpaths : [String(d).trim()];
+  const required = Math.max(3, Number.isFinite(minPoints) ? Math.floor(minPoints) : 3);
+  let best = null;
+  let bestScore = 0;
+
+  candidates.forEach((segment) => {
+    let points = extractPointsFromSimplePath(segment, required);
+    if (!points) {
+      const sampled = samplePathPolyline(segment, 2.2);
+      if (sampled.length >= required) {
+        points = simplifyClosedPolygon(sampled, 1.1);
+      }
+    }
+    if (!Array.isArray(points) || points.length < required) return;
+
+    let normalized = dedupeSequentialPoints(points, 0.4).map((point) => [point[0], point[1]]);
+    if (normalized.length > 2 && pointDistance2(normalized[0], normalized[normalized.length - 1]) < 1) {
+      normalized = normalized.slice(0, -1);
+    }
+    if (normalized.length < required) return;
+
+    const score = contourArea(normalized);
+    if (score > bestScore) {
+      bestScore = score;
+      best = normalized;
+    }
+  });
+
+  return best;
+}
+
 function pointsToPath(points, pointModes = null, closed = true) {
   if (!Array.isArray(points) || points.length < 2) return null;
 
@@ -513,6 +623,273 @@ function smoothOpenPolyline(points, strength) {
 
   output.push(points[n - 1].map((value) => value));
   return output;
+}
+
+function signedContourArea(points) {
+  if (!Array.isArray(points) || points.length < 3) return 0;
+  let area = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+    area += current[0] * next[1] - next[0] * current[1];
+  }
+  return area * 0.5;
+}
+
+function polygonCentroid(points) {
+  if (!Array.isArray(points) || !points.length) return [0, 0];
+  let sumX = 0;
+  let sumY = 0;
+  points.forEach((point) => {
+    sumX += point[0];
+    sumY += point[1];
+  });
+  return [sumX / points.length, sumY / points.length];
+}
+
+function pointInPolygon(point, polygon) {
+  if (!Array.isArray(point) || point.length < 2 || !Array.isArray(polygon) || polygon.length < 3) return false;
+  const x = point[0];
+  const y = point[1];
+  let inside = false;
+
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+    const xi = polygon[i][0];
+    const yi = polygon[i][1];
+    const xj = polygon[j][0];
+    const yj = polygon[j][1];
+    const intersects = (yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / ((yj - yi) || 1e-9) + xi;
+    if (intersects) inside = !inside;
+  }
+
+  return inside;
+}
+
+function contourModeSamples(points, pointModes) {
+  if (!Array.isArray(points) || points.length < 1) return [];
+  const modes = normalizePointModes(pointModes, points.length, 'corner');
+  const samples = [];
+  points.forEach((point, index) => {
+    if (!Array.isArray(point) || point.length < 2) return;
+    const x = Number(point[0]);
+    const y = Number(point[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    samples.push({
+      x,
+      y,
+      mode: modes[index] === 'smooth' ? 'smooth' : 'corner',
+    });
+  });
+  return samples;
+}
+
+function collectModeSamplesFromPaths(paths) {
+  if (!Array.isArray(paths) || !paths.length) return [];
+  const samples = [];
+  paths.forEach((path) => {
+    if (!path || !Array.isArray(path.points)) return;
+    samples.push(...contourModeSamples(path.points, path.pointModes));
+    if (!Array.isArray(path.holes)) return;
+    path.holes.forEach((rawHole) => {
+      const hole = normalizeHole(rawHole);
+      if (!hole) return;
+      samples.push(...contourModeSamples(hole.points, hole.pointModes));
+    });
+  });
+  return samples;
+}
+
+function inferPointModesFromSamples(points, samples) {
+  if (!Array.isArray(points) || !points.length) return [];
+  if (!Array.isArray(samples) || !samples.length) {
+    return Array.from({ length: points.length }, () => 'corner');
+  }
+
+  return points.map((point) => {
+    if (!Array.isArray(point) || point.length < 2) return 'corner';
+    let nearestSmoothDistance2 = Number.POSITIVE_INFINITY;
+    let nearestCornerDistance2 = Number.POSITIVE_INFINITY;
+
+    for (let i = 0; i < samples.length; i += 1) {
+      const sample = samples[i];
+      const dx = point[0] - sample.x;
+      const dy = point[1] - sample.y;
+      const distance2 = dx * dx + dy * dy;
+      if (sample.mode === 'smooth') {
+        if (distance2 < nearestSmoothDistance2) nearestSmoothDistance2 = distance2;
+      } else if (distance2 < nearestCornerDistance2) {
+        nearestCornerDistance2 = distance2;
+      }
+    }
+
+    if (!Number.isFinite(nearestCornerDistance2)) {
+      return Number.isFinite(nearestSmoothDistance2) ? 'smooth' : 'corner';
+    }
+    if (!Number.isFinite(nearestSmoothDistance2)) return 'corner';
+    return nearestSmoothDistance2 * 0.9 < nearestCornerDistance2 ? 'smooth' : 'corner';
+  });
+}
+
+function buildMaskLoopsFromAlpha(alpha, width, height, options = {}) {
+  if (!alpha || !width || !height) return [];
+  const simplifyEpsilon = clamp(parseFloat(options.simplifyEpsilon) || 0.85, 0.25, 8);
+  const minArea = clamp(parseFloat(options.minArea) || 10, 1, 5000);
+  const edgeSegments = [];
+  const segmentKey = (x, y) => `${x},${y}`;
+  const isFilled = (x, y) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return false;
+    return alpha[y * width + x] > 0;
+  };
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (!isFilled(x, y)) continue;
+
+      if (!isFilled(x, y - 1)) edgeSegments.push([x, y, x + 1, y]);
+      if (!isFilled(x + 1, y)) edgeSegments.push([x + 1, y, x + 1, y + 1]);
+      if (!isFilled(x, y + 1)) edgeSegments.push([x + 1, y + 1, x, y + 1]);
+      if (!isFilled(x - 1, y)) edgeSegments.push([x, y + 1, x, y]);
+    }
+  }
+
+  if (!edgeSegments.length) return [];
+
+  const outgoing = new Map();
+  edgeSegments.forEach((segment, index) => {
+    const key = segmentKey(segment[0], segment[1]);
+    if (!outgoing.has(key)) outgoing.set(key, []);
+    outgoing.get(key).push(index);
+  });
+
+  const visited = new Uint8Array(edgeSegments.length);
+  const loops = [];
+
+  for (let i = 0; i < edgeSegments.length; i += 1) {
+    if (visited[i]) continue;
+
+    const startSegment = edgeSegments[i];
+    const startKey = segmentKey(startSegment[0], startSegment[1]);
+    let segmentIndex = i;
+    let guard = 0;
+    const loop = [];
+
+    while (!visited[segmentIndex] && guard < edgeSegments.length + 8) {
+      guard += 1;
+      visited[segmentIndex] = 1;
+      const segment = edgeSegments[segmentIndex];
+      loop.push([segment[0], segment[1]]);
+
+      const nextKey = segmentKey(segment[2], segment[3]);
+      if (nextKey === startKey) break;
+
+      const candidates = outgoing.get(nextKey) || [];
+      let nextIndex = -1;
+      for (let c = 0; c < candidates.length; c += 1) {
+        const candidate = candidates[c];
+        if (!visited[candidate]) {
+          nextIndex = candidate;
+          break;
+        }
+      }
+      if (nextIndex < 0) break;
+      segmentIndex = nextIndex;
+    }
+
+    if (loop.length < 3) continue;
+    let normalized = dedupeSequentialPoints(loop, 0.4).map((point) => [point[0], point[1]]);
+    if (normalized.length > 2 && pointDistance2(normalized[0], normalized[normalized.length - 1]) < 1) {
+      normalized = normalized.slice(0, -1);
+    }
+    if (normalized.length < 3) continue;
+
+    const simplified = simplifyClosedPolygon(normalized, simplifyEpsilon);
+    if (simplified.length < 3) continue;
+    if (contourArea(simplified) < minArea) continue;
+    loops.push(simplified);
+  }
+
+  return loops;
+}
+
+function buildMergedGeometryFromSelection(selectedPaths) {
+  if (!Array.isArray(selectedPaths) || !selectedPaths.length || !state.mergeRaster.ctx) return null;
+  const ctx = state.mergeRaster.ctx;
+  const { width, height } = state.mergeRaster;
+  const sourceModeSamples = collectModeSamplesFromPaths(selectedPaths);
+  const smoothSampleCount = sourceModeSamples.filter((sample) => sample.mode === 'smooth').length;
+  const cornerSampleCount = Math.max(0, sourceModeSamples.length - smoothSampleCount);
+  const curveHeavy = smoothSampleCount > cornerSampleCount;
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#ffffff';
+
+  let drewAny = false;
+  selectedPaths.forEach((path) => {
+    const d = pathDForMerge(path);
+    if (!d) return;
+    let shape = null;
+    try {
+      shape = new Path2D(d);
+    } catch {
+      shape = null;
+    }
+    if (!shape) return;
+    const fillRule = normalizeFillRule(path.fillRule, path.pathKind) === 'evenodd' ? 'evenodd' : 'nonzero';
+    ctx.fill(shape, fillRule);
+    drewAny = true;
+  });
+  ctx.restore();
+
+  if (!drewAny) return null;
+
+  const rgba = ctx.getImageData(0, 0, width, height).data;
+  const alpha = new Uint8Array(width * height);
+  for (let i = 0, p = 3; i < alpha.length; i += 1, p += 4) {
+    alpha[i] = rgba[p] > 0 ? 1 : 0;
+  }
+
+  const loops = buildMaskLoopsFromAlpha(alpha, width, height, {
+    simplifyEpsilon: curveHeavy ? 2.2 : 1.1,
+    minArea: 10,
+  });
+  if (!loops.length) return null;
+  loops.sort((a, b) => contourArea(b) - contourArea(a));
+
+  const outer = loops[0];
+  if (!Array.isArray(outer) || outer.length < 3) return null;
+
+  const holes = [];
+  loops.slice(1).forEach((loop) => {
+    const center = polygonCentroid(loop);
+    if (pointInPolygon(center, outer)) {
+      holes.push(loop);
+    }
+  });
+
+  const outerOriented = signedContourArea(outer) < 0 ? outer.slice() : outer.slice().reverse();
+  const holeContours = holes.map((hole) => (signedContourArea(hole) > 0 ? hole.slice() : hole.slice().reverse()));
+  const outerPointModes = inferPointModesFromSamples(outerOriented, sourceModeSamples);
+  const holePointModes = holeContours.map((hole) => inferPointModesFromSamples(hole, sourceModeSamples));
+  const pathSegments = [pointsToPath(outerOriented, outerPointModes, true)]
+    .concat(holeContours.map((hole, holeIndex) => pointsToPath(hole, holePointModes[holeIndex], true)))
+    .filter(Boolean);
+  if (!pathSegments.length) return null;
+
+  return {
+    d: pathSegments.join(' '),
+    fillRule: 'evenodd',
+    points: outerOriented.map((point) => [point[0], point[1]]),
+    pointModes: outerPointModes,
+    holes: holeContours.map((hole, holeIndex) => ({
+      points: hole.map((point) => [point[0], point[1]]),
+      pointModes: holePointModes[holeIndex] || Array.from({ length: hole.length }, () => 'corner'),
+    })),
+    loopCount: loops.length,
+  };
 }
 
 function buildEdgeMap(imageData) {
@@ -689,6 +1066,11 @@ function normalizePathKind(value) {
   return value === 'line' ? 'line' : 'area';
 }
 
+function normalizeFillRule(value, pathKind = 'area') {
+  if (normalizePathKind(pathKind) === 'line') return 'nonzero';
+  return String(value || '').trim().toLowerCase() === 'nonzero' ? 'nonzero' : 'evenodd';
+}
+
 function viaCirclesToPath(vias) {
   if (!Array.isArray(vias) || !vias.length) return '';
   const commands = [];
@@ -704,6 +1086,115 @@ function viaCirclesToPath(vias) {
     );
   });
   return commands.join(' ');
+}
+
+function dedupeSequentialPoints(points, minDistance = 0.25) {
+  if (!Array.isArray(points) || !points.length) return [];
+  const out = [points[0]];
+  const minDistance2 = minDistance * minDistance;
+
+  for (let i = 1; i < points.length; i += 1) {
+    const prev = out[out.length - 1];
+    const next = points[i];
+    if (pointDistance2(prev, next) > minDistance2) {
+      out.push(next);
+    }
+  }
+
+  if (out.length > 2 && pointDistance2(out[0], out[out.length - 1]) < minDistance2) {
+    out.pop();
+  }
+
+  return out;
+}
+
+function samplePathPolyline(d, step = 1.5) {
+  if (!d) return [];
+  const probe = document.createElementNS(SVG_NS, 'path');
+  probe.setAttribute('d', d);
+
+  let total = 0;
+  try {
+    total = probe.getTotalLength();
+  } catch (error) {
+    return [];
+  }
+
+  if (!Number.isFinite(total) || total <= 0) return [];
+  const stepSize = clamp(step, 0.5, 8);
+  const segments = Math.max(2, Math.ceil(total / stepSize));
+  const sampled = [];
+
+  for (let i = 0; i <= segments; i += 1) {
+    const p = probe.getPointAtLength((total * i) / segments);
+    sampled.push([clamp(p.x, 0, CANVAS_SIZE), clamp(p.y, 0, CANVAS_SIZE)]);
+  }
+
+  return dedupeSequentialPoints(sampled, stepSize * 0.2);
+}
+
+function normalizeVector(dx, dy, fallback = [1, 0]) {
+  const length = Math.sqrt(dx * dx + dy * dy);
+  if (!Number.isFinite(length) || length < 1e-6) {
+    return fallback;
+  }
+  return [dx / length, dy / length];
+}
+
+function openPolylineToRibbon(points, halfWidth) {
+  if (!Array.isArray(points) || points.length < 2) return [];
+  const n = points.length;
+  const half = Math.max(0.25, Number(halfWidth) || 0.5);
+  const left = [];
+  const right = [];
+
+  for (let i = 0; i < n; i += 1) {
+    const prev = points[Math.max(0, i - 1)];
+    const cur = points[i];
+    const next = points[Math.min(n - 1, i + 1)];
+    const [tx, ty] = normalizeVector(next[0] - prev[0], next[1] - prev[1], [1, 0]);
+    const nx = -ty;
+    const ny = tx;
+
+    left.push([
+      clamp(cur[0] + nx * half, 0, CANVAS_SIZE),
+      clamp(cur[1] + ny * half, 0, CANVAS_SIZE),
+    ]);
+    right.push([
+      clamp(cur[0] - nx * half, 0, CANVAS_SIZE),
+      clamp(cur[1] - ny * half, 0, CANVAS_SIZE),
+    ]);
+  }
+
+  return [...left, ...right.reverse()];
+}
+
+function buildLineExportPathD(path) {
+  const halfWidth = Math.max(0.5, (parseFloat(path.strokeWidth) || 1) / 2);
+  const sampleStep = Math.max(0.8, halfWidth * 0.7);
+  let source = [];
+
+  if (path && Array.isArray(path.points) && path.points.length >= 2) {
+    const centerline = pointsToPath(path.points, path.pointModes, false);
+    if (centerline) {
+      source = samplePathPolyline(centerline, sampleStep);
+      if (source.length < 2) {
+        source = path.points.map((point) => [point[0], point[1]]);
+      }
+    }
+  }
+
+  if (source.length < 2 && path && typeof path.d === 'string' && path.d.trim().length) {
+    source = samplePathPolyline(path.d, sampleStep);
+  }
+
+  if (source.length < 2) return String(path?.d || '').trim();
+  const ring = openPolylineToRibbon(source, halfWidth);
+  const ribbon = pointsToPath(ring, null, true);
+  if (!ribbon) return String(path?.d || '').trim();
+
+  const viasPath = viaCirclesToPath(path.vias);
+  return viasPath ? `${ribbon} ${viasPath}` : ribbon;
 }
 
 function buildPathD(path) {
@@ -733,6 +1224,7 @@ function normalizePath(raw) {
   const color = String(raw?.color || '#ffe05e').trim() || '#ffe05e';
   const strokeWidth = clamp(parseFloat(raw?.strokeWidth) || 1, 0.1, 20);
   const pathKind = normalizePathKind(raw?.pathKind || raw?.editorKind);
+  const fillRule = normalizeFillRule(raw?.fillRule || raw?.editorFillRule, pathKind);
   const holes = Array.isArray(raw?.holes)
     ? raw.holes.map(normalizeHole).filter(Boolean)
     : parseHoles(raw?.editorHoles || '');
@@ -814,6 +1306,7 @@ function normalizePath(raw) {
     color,
     strokeWidth,
     pathKind,
+    fillRule,
     holes,
     vias,
     points,
@@ -832,6 +1325,7 @@ function cloneSerializablePath(path) {
     color: String(path.color || '#ffe05e'),
     strokeWidth: clamp(parseFloat(path.strokeWidth) || 1, 0.1, 20),
     pathKind: normalizePathKind(path.pathKind),
+    fillRule: normalizeFillRule(path.fillRule, path.pathKind),
     holes: Array.isArray(path.holes)
       ? path.holes
           .map(normalizeHole)
@@ -901,6 +1395,7 @@ function recordUndoSnapshot(label, details = {}) {
     pathUid: details.pathUid || (path && path.uid) || null,
     pathLabel: details.pathLabel || (path && path.netLabel) || null,
     selectedUid: state.selectedUid,
+    selectedUids: selectedPathUids(),
     selectedAnchorIndex: Number.isInteger(state.selectedAnchorIndex) ? state.selectedAnchorIndex : null,
     selectedHoleIndex: Number.isInteger(state.selectedHoleIndex) ? state.selectedHoleIndex : null,
     nextUid: state.nextUid,
@@ -950,6 +1445,11 @@ function undoLastEdit({ announce = true } = {}) {
     }
 
     state.selectedUid = typeof snapshot.selectedUid === 'string' ? snapshot.selectedUid : null;
+    state.selectedUids = Array.isArray(snapshot.selectedUids)
+      ? snapshot.selectedUids.map((uid) => String(uid || '')).filter(Boolean)
+      : state.selectedUid
+        ? [state.selectedUid]
+        : [];
     state.selectedAnchorIndex = Number.isInteger(snapshot.selectedAnchorIndex)
       ? snapshot.selectedAnchorIndex
       : null;
@@ -975,7 +1475,7 @@ function undoLastEdit({ announce = true } = {}) {
 function saveDraft(silent = true) {
   try {
     const snapshot = {
-      version: 3,
+      version: 4,
       side: state.side,
       layerImage: state.layerImage,
       tool: state.tool,
@@ -984,9 +1484,23 @@ function saveDraft(silent = true) {
       panY: state.panY,
       mirror: !!elements.mirror.checked,
       nextUid: state.nextUid,
+      nextGroupUid: state.nextGroupUid,
       selectedUid: state.selectedUid,
+      selectedUids: selectedPathUids(),
+      selectedGroupId: state.selectedGroupId,
       selectedAnchorIndex: state.selectedAnchorIndex,
       selectedHoleIndex: state.selectedHoleIndex,
+      helpPanels: {
+        tools: state.helpPanels.tools === true,
+        paths: state.helpPanels.paths === true,
+      },
+      groups: state.groups.map((group) => ({
+        id: group.id,
+        name: group.name,
+        order: group.order,
+        defaultOn: group.defaultOn !== false,
+        netIds: normalizeGroupNetIds(group.netIds),
+      })),
       form: {
         netId: elements.netId.value,
         netLabel: elements.netLabel.value,
@@ -1079,14 +1593,27 @@ function restoreDraft() {
     state.nextUid = Number.isFinite(explicitNextUid)
       ? Math.max(explicitNextUid, inferredNextUid)
       : inferredNextUid;
+    state.groups = normalizeGroups(data.groups);
+    const explicitNextGroupUid = parseInt(data.nextGroupUid, 10);
+    const nextGroupFloor = inferNextGroupUid(state.groups);
+    state.nextGroupUid = Number.isFinite(explicitNextGroupUid)
+      ? Math.max(explicitNextGroupUid, nextGroupFloor)
+      : nextGroupFloor;
 
     state.selectedUid = typeof data.selectedUid === 'string' ? data.selectedUid : null;
+    state.selectedUids = Array.isArray(data.selectedUids)
+      ? data.selectedUids.map((uid) => String(uid || '')).filter(Boolean)
+      : state.selectedUid
+        ? [state.selectedUid]
+        : [];
+    state.selectedGroupId = typeof data.selectedGroupId === 'string' ? data.selectedGroupId : null;
     state.selectedAnchorIndex = Number.isInteger(data.selectedAnchorIndex)
       ? data.selectedAnchorIndex
       : null;
     state.selectedHoleIndex = Number.isInteger(data.selectedHoleIndex)
       ? data.selectedHoleIndex
       : null;
+    state.helpPanels = normalizeHelpPanelState(data.helpPanels);
 
     if (data.form && typeof data.form === 'object') {
       elements.netId.value = normalizeNetKey(String(data.form.netId || ''));
@@ -1115,6 +1642,322 @@ function currentPaths() {
   return state.sides[state.side].paths;
 }
 
+function normalizeSelectedUids(uids) {
+  const valid = new Set(currentPaths().map((path) => path.uid));
+  const source = Array.isArray(uids) ? uids : [];
+  const deduped = [];
+  source.forEach((uid) => {
+    const id = String(uid || '');
+    if (!id || !valid.has(id) || deduped.includes(id)) return;
+    deduped.push(id);
+  });
+  return deduped;
+}
+
+function selectedPathUids() {
+  const multi = normalizeSelectedUids(state.selectedUids);
+  if (multi.length) return multi;
+  if (state.selectedUid && currentPaths().some((path) => path.uid === state.selectedUid)) {
+    return [state.selectedUid];
+  }
+  return [];
+}
+
+function updateMergeButtonState() {
+  if (!elements.mergePaths) return;
+  elements.mergePaths.disabled = selectedPathUids().length < 2;
+}
+
+function normalizeGroupNetIds(netIds) {
+  const source = Array.isArray(netIds) ? netIds : [];
+  const normalized = [];
+  source.forEach((netId) => {
+    const key = normalizeNetKey(netId);
+    if (!key.length || normalized.includes(key)) return;
+    normalized.push(key);
+  });
+  return normalized;
+}
+
+function normalizeGroup(raw, fallbackIndex = 0) {
+  const fallbackName = `Group ${fallbackIndex + 1}`;
+  const name = String(raw?.name || '').trim() || fallbackName;
+  const orderRaw = parseInt(raw?.order, 10);
+  const order = Number.isFinite(orderRaw) ? orderRaw : fallbackIndex;
+  const defaultOn = raw?.defaultOn !== false;
+  const netIds = normalizeGroupNetIds(raw?.netIds);
+  const id = String(raw?.id || '').trim() || `g-${fallbackIndex + 1}`;
+  return { id, name, order, defaultOn, netIds };
+}
+
+function normalizeGroups(rawGroups) {
+  if (!Array.isArray(rawGroups)) return [];
+  const groups = [];
+  const seen = new Set();
+  rawGroups.forEach((raw, index) => {
+    const group = normalizeGroup(raw, index);
+    let id = group.id;
+    if (seen.has(id) || !id.length) {
+      let n = index + 1;
+      while (seen.has(`g-${n}`)) n += 1;
+      id = `g-${n}`;
+    }
+    seen.add(id);
+    groups.push({ ...group, id });
+  });
+  return groups;
+}
+
+function inferNextGroupUid(groups = state.groups) {
+  let max = 0;
+  (Array.isArray(groups) ? groups : []).forEach((group) => {
+    const match = String(group?.id || '').match(/^g-(\d+)$/);
+    if (!match) return;
+    max = Math.max(max, parseInt(match[1], 10));
+  });
+  return max + 1;
+}
+
+function sortedGroups() {
+  return [...state.groups].sort((a, b) => {
+    const ao = parseInt(a.order, 10);
+    const bo = parseInt(b.order, 10);
+    const orderA = Number.isFinite(ao) ? ao : 0;
+    const orderB = Number.isFinite(bo) ? bo : 0;
+    if (orderA !== orderB) return orderA - orderB;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+}
+
+function groupLabel(group) {
+  if (!group) return '';
+  const orderRaw = parseInt(group.order, 10);
+  const order = Number.isFinite(orderRaw) ? orderRaw : 0;
+  const name = String(group.name || '').trim() || 'Group';
+  const count = Array.isArray(group.netIds) ? group.netIds.length : 0;
+  return `${order} · ${name} (${count})`;
+}
+
+function groupsModalOpen() {
+  return !!elements.groupsModal && !elements.groupsModal.hidden;
+}
+
+function currentKnownNetIds() {
+  const known = [];
+  ['front', 'back'].forEach((side) => {
+    const paths = state.sides[side]?.paths || [];
+    paths.forEach((path) => {
+      const key = normalizeNetKey(path?.netId);
+      if (!key.length || known.includes(key)) return;
+      known.push(key);
+    });
+  });
+  return known.sort((a, b) => a.localeCompare(b));
+}
+
+function selectedGroup() {
+  if (!state.selectedGroupId) return null;
+  return state.groups.find((group) => group.id === state.selectedGroupId) || null;
+}
+
+function ensureSelectedGroup() {
+  if (!state.groups.length) {
+    state.selectedGroupId = null;
+    return null;
+  }
+  if (!selectedGroup()) {
+    state.selectedGroupId = sortedGroups()[0].id;
+  }
+  return selectedGroup();
+}
+
+function renderSimpleOptions(select, values) {
+  if (!select) return;
+  select.innerHTML = '';
+  values.forEach((value) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value;
+    select.append(option);
+  });
+}
+
+function renderGroupsModal() {
+  if (!elements.groupsModal) return;
+
+  const groups = sortedGroups();
+  elements.groupsList.innerHTML = '';
+  groups.forEach((group) => {
+    const option = document.createElement('option');
+    option.value = group.id;
+    option.textContent = groupLabel(group);
+    elements.groupsList.append(option);
+  });
+
+  const group = ensureSelectedGroup();
+  if (group) {
+    elements.groupsList.value = group.id;
+  }
+
+  const hasGroup = !!group;
+  elements.groupDelete.disabled = !hasGroup;
+  elements.groupSave.disabled = !hasGroup;
+  elements.groupName.disabled = !hasGroup;
+  elements.groupOrder.disabled = !hasGroup;
+  elements.groupDefaultOn.disabled = !hasGroup;
+  elements.groupNetAvailable.disabled = !hasGroup;
+  elements.groupNetMembers.disabled = !hasGroup;
+
+  if (!hasGroup) {
+    elements.groupName.value = '';
+    elements.groupOrder.value = '0';
+    elements.groupDefaultOn.checked = true;
+    renderSimpleOptions(elements.groupNetAvailable, currentKnownNetIds());
+    renderSimpleOptions(elements.groupNetMembers, []);
+    elements.groupAddNet.disabled = true;
+    elements.groupRemoveNet.disabled = true;
+    return;
+  }
+
+  elements.groupName.value = group.name;
+  elements.groupOrder.value = String(group.order);
+  elements.groupDefaultOn.checked = !!group.defaultOn;
+
+  const knownNetIds = currentKnownNetIds();
+  const memberSet = new Set(group.netIds);
+  const available = knownNetIds.filter((netId) => !memberSet.has(netId));
+  const members = [...group.netIds].sort((a, b) => a.localeCompare(b));
+  renderSimpleOptions(elements.groupNetAvailable, available);
+  renderSimpleOptions(elements.groupNetMembers, members);
+
+  elements.groupAddNet.disabled = !available.length;
+  elements.groupRemoveNet.disabled = !members.length;
+}
+
+function syncSelectedGroupListLabel() {
+  const group = selectedGroup();
+  if (!group) return;
+  const option = Array.from(elements.groupsList.options).find((entry) => entry.value === group.id);
+  if (!option) return;
+  option.textContent = groupLabel(group);
+}
+
+function applySelectedGroupForm({ save = true, announce = false, rerender = true } = {}) {
+  const group = selectedGroup();
+  if (!group) return false;
+
+  const nextName = String(elements.groupName.value || '').trim();
+  const orderRaw = parseInt(elements.groupOrder.value, 10);
+  const nextOrder = Number.isFinite(orderRaw) ? orderRaw : 0;
+  const nextDefaultOn = !!elements.groupDefaultOn.checked;
+
+  if (nextName.length) {
+    group.name = nextName;
+  }
+  group.order = nextOrder;
+  group.defaultOn = nextDefaultOn;
+
+  if (rerender) {
+    renderGroupsModal();
+  } else {
+    syncSelectedGroupListLabel();
+  }
+  if (save) saveDraft();
+  if (announce) setStatus(`Saved group ${group.name}.`);
+  return true;
+}
+
+function refreshGroupsModalIfOpen() {
+  if (!groupsModalOpen()) return;
+  renderGroupsModal();
+}
+
+function openGroupsModal() {
+  if (!elements.groupsModal) return;
+  renderGroupsModal();
+  elements.groupsModal.hidden = false;
+}
+
+function closeGroupsModal() {
+  if (!elements.groupsModal) return;
+  elements.groupsModal.hidden = true;
+}
+
+function createGroup() {
+  const id = `g-${state.nextGroupUid++}`;
+  const group = normalizeGroup(
+    {
+      id,
+      name: `Group ${state.groups.length + 1}`,
+      order: state.groups.length,
+      defaultOn: true,
+      netIds: [],
+    },
+    state.groups.length
+  );
+  state.groups.push(group);
+  state.selectedGroupId = group.id;
+  renderGroupsModal();
+  saveDraft();
+  setStatus(`Created ${group.name}.`);
+}
+
+function deleteSelectedGroup() {
+  const group = selectedGroup();
+  if (!group) {
+    setStatus('Select a group to delete.');
+    return;
+  }
+  state.groups = state.groups.filter((entry) => entry.id !== group.id);
+  state.selectedGroupId = null;
+  ensureSelectedGroup();
+  renderGroupsModal();
+  saveDraft();
+  setStatus(`Deleted ${group.name}.`);
+}
+
+function saveSelectedGroupDetails() {
+  if (!selectedGroup()) {
+    setStatus('Select a group first.');
+    return;
+  }
+  applySelectedGroupForm({ save: true, announce: true, rerender: true });
+}
+
+function addNetIdsToSelectedGroup() {
+  const group = selectedGroup();
+  if (!group) {
+    setStatus('Select a group first.');
+    return;
+  }
+  const selected = Array.from(elements.groupNetAvailable.selectedOptions)
+    .map((option) => normalizeNetKey(option.value))
+    .filter(Boolean);
+  if (!selected.length) return;
+  group.netIds = normalizeGroupNetIds([...group.netIds, ...selected]);
+  renderGroupsModal();
+  saveDraft();
+  setStatus(`Added ${selected.length} net id(s) to ${group.name}.`);
+}
+
+function removeNetIdsFromSelectedGroup() {
+  const group = selectedGroup();
+  if (!group) {
+    setStatus('Select a group first.');
+    return;
+  }
+  const selected = new Set(
+    Array.from(elements.groupNetMembers.selectedOptions)
+      .map((option) => normalizeNetKey(option.value))
+      .filter(Boolean)
+  );
+  if (!selected.size) return;
+  group.netIds = group.netIds.filter((netId) => !selected.has(netId));
+  renderGroupsModal();
+  saveDraft();
+  setStatus(`Removed ${selected.size} net id(s) from ${group.name}.`);
+}
+
 function syncNetColorFromSelection() {
   const path = activePath();
   if (path && typeof path.color === 'string' && path.color.trim().length > 0) {
@@ -1124,30 +1967,65 @@ function syncNetColorFromSelection() {
   elements.color.value = currentNetColor();
 }
 
+function oppositeSide(side = state.side) {
+  return side === 'back' ? 'front' : 'back';
+}
+
+function findNetTemplateOnSide(netKey, side = state.side, options = {}) {
+  const { excludeUid = null } = options;
+  const targetKey = normalizeNetKey(netKey);
+  if (!targetKey.length) return null;
+  const paths = state.sides[side]?.paths || [];
+  return (
+    paths.find((path) => {
+      if (!path) return false;
+      if (excludeUid && path.uid === excludeUid) return false;
+      return normalizeNetKey(path.netId) === targetKey;
+    }) || null
+  );
+}
+
+function forEachPathByNetKey(netKey, callback) {
+  const targetKey = normalizeNetKey(netKey);
+  if (!targetKey.length || typeof callback !== 'function') return 0;
+  let count = 0;
+  ['front', 'back'].forEach((side) => {
+    const paths = state.sides[side]?.paths || [];
+    paths.forEach((path) => {
+      if (normalizeNetKey(path.netId) !== targetKey) return;
+      callback(path, side);
+      count += 1;
+    });
+  });
+  return count;
+}
+
 function applyColorToNet(netId, color, options = {}) {
   const { save = true, announce = false, recordUndo = false } = options;
-  const targetNetId = withSidePrefix(netId, state.side);
-  if (!targetNetId) {
+  const targetNetKey = normalizeNetKey(netId);
+  if (!targetNetKey) {
     if (announce) setStatus('Enter a net id first.');
     return;
   }
 
   const previousColor = currentNetColor();
   const nextColor = normalizeHexColor(color, '#ffe05e');
-  const targetNetKey = normalizeNetKey(targetNetId);
-  const paths = currentPaths().filter((path) => normalizeNetKey(path.netId) === targetNetKey);
-  const hasChange = paths.some((path) => normalizeHexColor(path.color, nextColor) !== nextColor);
+  let hasChange = false;
+  const matchedCount = forEachPathByNetKey(targetNetKey, (path) => {
+    const current = normalizeHexColor(path.color, nextColor);
+    if (current !== nextColor) hasChange = true;
+  });
   if (recordUndo && hasChange) {
     recordUndoSnapshot('Change net color', { layerColor: previousColor });
   }
 
   elements.color.value = nextColor;
-  paths.forEach((path) => {
+  forEachPathByNetKey(targetNetKey, (path) => {
     path.color = nextColor;
   });
   renderOverlay();
   if (announce) {
-    const suffix = paths.length ? ` to ${paths.length} path(s)` : '';
+    const suffix = matchedCount ? ` to ${matchedCount} path(s) across both sides` : '';
     setStatus(`Applied net color${suffix}.`);
   }
   if (save) saveDraft();
@@ -1162,6 +2040,7 @@ function ensureSelectedPath() {
   const paths = currentPaths();
   if (!paths.length) {
     state.selectedUid = null;
+    state.selectedUids = [];
     state.selectedAnchorIndex = null;
     state.selectedHoleIndex = null;
     return;
@@ -1169,9 +2048,10 @@ function ensureSelectedPath() {
 
   if (!state.selectedUid || !paths.some((entry) => entry.uid === state.selectedUid)) {
     state.selectedUid = paths[0].uid;
-    state.selectedAnchorIndex = null;
-    state.selectedHoleIndex = null;
   }
+  state.selectedUids = state.selectedUid ? [state.selectedUid] : [];
+  state.selectedAnchorIndex = null;
+  state.selectedHoleIndex = null;
 
   const selectedPath = activePath();
   if (!selectedPath || !Array.isArray(selectedPath.points)) {
@@ -1356,6 +2236,7 @@ function readPathMetaFromForm() {
 
 function refreshPathList() {
   const paths = currentPaths();
+  const selectedSet = new Set(selectedPathUids());
   elements.pathList.innerHTML = '';
 
   paths.forEach((path) => {
@@ -1367,14 +2248,18 @@ function refreshPathList() {
     const mode = hasSmooth && hasCorner ? 'mixed' : hasSmooth ? 'smooth' : 'corner';
     const netKey = normalizeNetKey(path.netId) || 'uncategorized';
     option.textContent = `${path.netLabel} (${netKey}, ${mode})`;
-    option.selected = path.uid === state.selectedUid;
+    option.selected = selectedSet.has(path.uid);
     elements.pathList.append(option);
   });
+
+  updateMergeButtonState();
+  refreshGroupsModalIfOpen();
 }
 
 function selectPath(uid, options = {}) {
   const { save = true, bringIntoView = true } = options;
   state.selectedUid = uid;
+  state.selectedUids = uid ? [uid] : [];
   state.selectedAnchorIndex = null;
   state.selectedHoleIndex = null;
   const path = activePath();
@@ -1397,6 +2282,109 @@ function selectAdjacentPath(delta) {
   const nextIndex = (currentIndex + step + paths.length) % paths.length;
   selectPath(paths[nextIndex].uid, { save: true });
   setStatus(`Selected ${paths[nextIndex].netLabel}.`);
+}
+
+function pathDForMerge(path) {
+  if (!path) return '';
+  const kind = normalizePathKind(path.pathKind);
+  if (kind === 'line') {
+    return buildLineExportPathD(path) || String(path.d || '').trim();
+  }
+  return String(path.d || '').trim();
+}
+
+function mergeSelectedPaths() {
+  const uids = selectedPathUids();
+  if (uids.length < 2) {
+    setStatus('Select at least 2 paths in the list to merge.');
+    return;
+  }
+
+  const paths = currentPaths();
+  const indexByUid = new Map(paths.map((path, index) => [path.uid, index]));
+  const selected = uids
+    .map((uid) => paths[indexByUid.get(uid)])
+    .filter(Boolean);
+
+  if (selected.length < 2) {
+    setStatus('Select at least 2 valid paths to merge.');
+    return;
+  }
+
+  const mergedParts = selected
+    .map((path) => pathDForMerge(path))
+    .filter((value) => value.length > 0);
+  if (!mergedParts.length) {
+    setStatus('Could not merge: selected paths have no geometry.');
+    return;
+  }
+
+  const primary = selected[0];
+  const mergedD = mergedParts.join(' ');
+  const mergedGeometry = buildMergedGeometryFromSelection(selected);
+  const mergedFillRule = mergedGeometry?.fillRule || 'evenodd';
+  const selectedSet = new Set(selected.map((path) => path.uid));
+  const firstIndex = Math.min(...selected.map((path) => indexByUid.get(path.uid)));
+  const sourceModeSamples = collectModeSamplesFromPaths(selected);
+  let mergedPoints = mergedGeometry?.points || null;
+  let mergedPointModes = mergedGeometry?.pointModes || [];
+  let mergedHoles = mergedGeometry?.holes || [];
+  let finalD = mergedGeometry?.d || mergedD;
+
+  if (!mergedPoints) {
+    const editableSource =
+      selected.find((path) => normalizePathKind(path.pathKind) !== 'line' && Array.isArray(path.points) && path.points.length >= 3) ||
+      selected.find((path) => Array.isArray(path.points) && path.points.length >= 3) ||
+      primary;
+    mergedPoints =
+      Array.isArray(editableSource.points) && editableSource.points.length >= 3
+        ? editableSource.points.map((point) => [point[0], point[1]])
+        : null;
+    if (!mergedPoints) {
+      mergedPoints = extractEditableContourFromPathD(finalD, 3);
+    }
+    mergedPointModes = Array.isArray(mergedPoints)
+      ? inferPointModesFromSamples(
+          mergedPoints,
+          sourceModeSamples.length ? sourceModeSamples : contourModeSamples(editableSource.points, editableSource.pointModes)
+        )
+      : [];
+    mergedHoles = [];
+  }
+
+  recordUndoSnapshot('Merge paths', { pathLabel: primary.netLabel });
+
+  const mergedPath = {
+    uid: `p-${state.nextUid++}`,
+    d: finalD,
+    netId: primary.netId,
+    netLabel: primary.netLabel,
+    category: primary.category || categoryFromNetId(primary.netId),
+    color: primary.color,
+    strokeWidth: clamp(parseFloat(primary.strokeWidth) || 1, 0.1, 20),
+    pathKind: 'area',
+    fillRule: mergedFillRule,
+    holes: mergedHoles,
+    vias: [],
+    points: mergedPoints,
+    pointModes: mergedPointModes,
+  };
+
+  const remaining = paths.filter((path) => !selectedSet.has(path.uid));
+  remaining.splice(firstIndex, 0, mergedPath);
+  state.sides[state.side].paths = remaining;
+  state.selectedUid = mergedPath.uid;
+  state.selectedUids = [mergedPath.uid];
+  state.selectedAnchorIndex = null;
+  state.selectedHoleIndex = null;
+
+  assignFormDefaults(mergedPath);
+  refreshPathList();
+  renderOverlay();
+  ensurePathVisible(mergedPath);
+  const loopInfo = mergedGeometry && Number.isInteger(mergedGeometry.loopCount) ? ` (${mergedGeometry.loopCount} contour${mergedGeometry.loopCount === 1 ? '' : 's'})` : '';
+  setStatus(`Merged ${selected.length} paths into ${mergedPath.netLabel}${loopInfo}.`);
+  saveDraft();
 }
 
 function pathBoundsFromPoints(path) {
@@ -1491,6 +2479,7 @@ function ensurePathVisible(path) {
 
 function createPathElements(path) {
   const isLine = normalizePathKind(path.pathKind) === 'line';
+  const fillRule = normalizeFillRule(path.fillRule, path.pathKind);
   const visual = document.createElementNS(SVG_NS, 'path');
   visual.setAttribute('d', path.d);
   visual.setAttribute('stroke', path.color);
@@ -1501,8 +2490,8 @@ function createPathElements(path) {
   } else {
     visual.setAttribute('fill', path.color);
     visual.setAttribute('fill-opacity', state.debugFillOpacity.toFixed(2));
-    visual.setAttribute('fill-rule', 'evenodd');
-    visual.setAttribute('clip-rule', 'evenodd');
+    visual.setAttribute('fill-rule', fillRule);
+    visual.setAttribute('clip-rule', fillRule);
   }
   visual.setAttribute('class', 'net-path is-selected');
   visual.dataset.uid = path.uid;
@@ -1581,6 +2570,13 @@ function renderOverlay() {
 
   const path = activePath();
   if (path) {
+    if (normalizePathKind(path.pathKind) !== 'line' && (!Array.isArray(path.points) || path.points.length < 3)) {
+      const recoveredPoints = extractEditableContourFromPathD(path.d, 3);
+      if (Array.isArray(recoveredPoints) && recoveredPoints.length >= 3) {
+        path.points = recoveredPoints;
+        path.pointModes = normalizePointModes(path.pointModes, recoveredPoints.length, 'corner');
+      }
+    }
     const [visual, hit] = createPathElements(path);
     elements.overlay.append(visual, hit, ...createAnchorElements(path));
   }
@@ -1652,6 +2648,7 @@ function addPathFromPoints(points, options = {}) {
     color: meta.color,
     strokeWidth: meta.strokeWidth,
     pathKind: kind,
+    fillRule: kind === 'line' ? 'nonzero' : 'evenodd',
     holes: [],
     vias: Array.isArray(vias)
       ? vias
@@ -1747,11 +2744,18 @@ function applyMetaToSelected() {
   path.netLabel = meta.netLabel;
   path.category = meta.category;
   path.strokeWidth = meta.strokeWidth;
+  const targetNetKey = normalizeNetKey(meta.netId);
+  const matchedCount = forEachPathByNetKey(targetNetKey, (entry) => {
+    entry.netLabel = meta.netLabel;
+    entry.category = meta.category;
+    entry.color = normalizeHexColor(meta.color, '#ffe05e');
+  });
   applyColorToNet(meta.netId, meta.color, { save: false, announce: false, recordUndo: false });
 
   refreshPathList();
   renderOverlay();
-  setStatus(`Updated ${path.netLabel}. Net color applied to matching paths.`);
+  const suffix = matchedCount ? ` (${matchedCount} path(s) across both sides).` : '.';
+  setStatus(`Updated ${path.netLabel}. Net label and color synced by net id${suffix}`);
   saveDraft();
 }
 
@@ -2052,13 +3056,46 @@ function deleteNodeFromMenu() {
   saveDraft();
 }
 
+function serializeGroupsForSvg() {
+  const groups = sortedGroups().map((group) => ({
+    id: String(group.id || ''),
+    name: String(group.name || '').trim() || 'Group',
+    order: Number.isFinite(parseInt(group.order, 10)) ? parseInt(group.order, 10) : 0,
+    defaultOn: group.defaultOn !== false,
+    netIds: normalizeGroupNetIds(group.netIds),
+  }));
+  return JSON.stringify(groups);
+}
+
+function applyGroupsFromSvgPayload(payload) {
+  const raw = String(payload || '').trim();
+  if (!raw.length) return false;
+  try {
+    const parsed = JSON.parse(raw);
+    const groups = normalizeGroups(parsed);
+    if (!groups.length) return false;
+    state.groups = groups;
+    state.nextGroupUid = Math.max(state.nextGroupUid, inferNextGroupUid(groups));
+    ensureSelectedGroup();
+    refreshGroupsModalIfOpen();
+    return true;
+  } catch (error) {
+    console.warn('Could not parse SVG group metadata', error);
+    return false;
+  }
+}
+
 function serializeCurrentSideSvg() {
+  const groupsJson = escapeXml(serializeGroupsForSvg());
   const body = currentPaths()
     .map((path) => {
       const exportedNetId = withSidePrefix(path.netId, state.side) || `${state.side}-net-${Date.now()}`;
       const exportedCategory = categoryFromNetId(exportedNetId);
+      const pathKind = normalizePathKind(path.pathKind);
+      const fillRule = normalizeFillRule(path.fillRule, pathKind);
+      const exportD = pathKind === 'line' ? buildLineExportPathD(path) || path.d : path.d;
       const attrs = [
-        `d="${escapeXml(path.d)}"`,
+        `d="${escapeXml(exportD)}"`,
         `data-net-id="${escapeXml(exportedNetId)}"`,
         `data-net-label="${escapeXml(path.netLabel)}"`,
         `data-category="${escapeXml(exportedCategory)}"`,
@@ -2067,12 +3104,12 @@ function serializeCurrentSideSvg() {
         `fill-opacity="1"`,
       ];
 
-      const pathKind = normalizePathKind(path.pathKind);
       attrs.push(`data-editor-kind="${escapeXml(pathKind)}"`);
       attrs.push('data-editor-mode-version="2"');
       if (pathKind !== 'line') {
-        attrs.push('fill-rule="evenodd"');
-        attrs.push('clip-rule="evenodd"');
+        attrs.push(`data-editor-fill-rule="${escapeXml(fillRule)}"`);
+        attrs.push(`fill-rule="${escapeXml(fillRule)}"`);
+        attrs.push(`clip-rule="${escapeXml(fillRule)}"`);
       }
 
       const minPoints = pathKind === 'line' ? 2 : 3;
@@ -2093,7 +3130,7 @@ function serializeCurrentSideSvg() {
     })
     .join('\n');
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CANVAS_SIZE} ${CANVAS_SIZE}">\n${body}\n</svg>\n`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CANVAS_SIZE} ${CANVAS_SIZE}" data-net-groups="${groupsJson}">\n${body}\n</svg>\n`;
 }
 
 function exportCurrentSide() {
@@ -2113,6 +3150,7 @@ function exportCurrentSide() {
 function parseSideSvg(side, source) {
   const doc = new DOMParser().parseFromString(source, 'image/svg+xml');
   const parsed = [];
+  applyGroupsFromSvgPayload(doc.documentElement?.dataset?.netGroups);
 
   doc.querySelectorAll('path[data-net-id]').forEach((node) => {
     const d = node.getAttribute('d');
@@ -2127,6 +3165,7 @@ function parseSideSvg(side, source) {
       color: node.dataset.color || node.getAttribute('stroke') || '#ffe05e',
       strokeWidth: node.dataset.strokeWidth || node.getAttribute('stroke-width') || '1',
       pathKind: node.dataset.editorKind,
+      editorFillRule: node.dataset.editorFillRule || node.getAttribute('fill-rule'),
       editorModeVersion: node.dataset.editorModeVersion,
       curveMode: node.dataset.curveMode,
       editorPoints: node.dataset.editorPoints,
@@ -2198,6 +3237,72 @@ async function importSideFromUploadedFile(file) {
   renderOverlay();
   setStatus(`Imported ${file.name} into ${state.side}.`);
   saveDraft(false);
+}
+
+async function createNewProject() {
+  const confirmed = window.confirm(
+    'Start a new project? This clears all paths, groups, and undo history on both sides.'
+  );
+  if (!confirmed) return;
+
+  state.side = 'front';
+  elements.side.value = 'front';
+  state.layerImage = 1;
+  elements.layerImage.value = '1';
+
+  state.zoom = 1;
+  state.panX = 20;
+  state.panY = 20;
+  elements.mirror.checked = false;
+
+  state.tool = 'select';
+  state.drawPoints = [];
+  state.drawVias = [];
+  state.drawing = null;
+  state.anchorDrag = null;
+  state.panning = null;
+  state.lastPointerPoint = null;
+  state.suppressOverlayClick = false;
+  hideNodeMenu();
+
+  state.selectedUid = null;
+  state.selectedUids = [];
+  state.selectedAnchorIndex = null;
+  state.selectedHoleIndex = null;
+  state.selectedGroupId = null;
+
+  state.nextUid = 1;
+  state.nextGroupUid = 1;
+  state.groups = [];
+  state.helpPanels = normalizeHelpPanelState(null);
+  applyHelpPanels();
+
+  state.sides.front.paths = [];
+  state.sides.back.paths = [];
+  state.sides.front.loaded = true;
+  state.sides.back.loaded = true;
+  resetUndoStack('front');
+  resetUndoStack('back');
+
+  elements.netId.value = '';
+  elements.netLabel.value = '';
+  elements.color.value = '#ffe05e';
+  elements.strokeWidth.value = '1';
+  setDebugFillOpacity(0.18, { save: false, announce: false });
+  elements.simplifyEpsilon.value = '3';
+  elements.smoothStrength.value = '0.25';
+  elements.magnetRadius.value = '10';
+  elements.magnetThreshold.value = '35';
+  elements.magnetStrength.value = '1.6';
+
+  updateSceneTransform();
+  await loadBaseImage();
+  syncNetColorFromSelection();
+  refreshPathList();
+  setTool('select', { save: false, announce: false });
+  renderOverlay();
+  saveDraft();
+  setStatus('Started a new empty project.');
 }
 
 function clientToCanvasPoint(clientX, clientY) {
@@ -2313,6 +3418,12 @@ function bindEvents() {
   elements.toolButtons.forEach((button) => {
     button.addEventListener('click', () => setTool(button.dataset.tool));
   });
+  if (elements.toolsHelpToggle) {
+    elements.toolsHelpToggle.addEventListener('click', () => toggleHelpPanel('tools'));
+  }
+  if (elements.pathsHelpToggle) {
+    elements.pathsHelpToggle.addEventListener('click', () => toggleHelpPanel('paths'));
+  }
 
   [
     elements.netId,
@@ -2331,9 +3442,24 @@ function bindEvents() {
   elements.netId.addEventListener('change', () => {
     const targetKey = normalizeNetKey(elements.netId.value);
     if (!targetKey) return;
-    const match = currentPaths().find((path) => normalizeNetKey(path.netId) === targetKey);
-    if (match && typeof match.color === 'string') {
-      elements.color.value = normalizeHexColor(match.color, '#ffe05e');
+    const selected = activePath();
+    const selectedUid = selected?.uid || null;
+    const sameSideMatch = findNetTemplateOnSide(targetKey, state.side, { excludeUid: selectedUid });
+    const otherSide = oppositeSide(state.side);
+    const oppositeMatch = findNetTemplateOnSide(targetKey, otherSide);
+    const template = sameSideMatch || oppositeMatch;
+
+    if (template?.netLabel && String(template.netLabel).trim().length) {
+      elements.netLabel.value = String(template.netLabel).trim();
+    }
+    if (template?.color && String(template.color).trim().length) {
+      elements.color.value = normalizeHexColor(template.color, '#ffe05e');
+    }
+
+    const shouldAutoApplyFromOpposite = !sameSideMatch && !!oppositeMatch && !!selected;
+    if (shouldAutoApplyFromOpposite) {
+      applyMetaToSelected();
+      setStatus(`Matched ${targetKey} from ${otherSide}; applied label and color.`);
     }
   });
 
@@ -2374,8 +3500,8 @@ function bindEvents() {
     saveDraft();
   });
 
-  elements.reloadSide.addEventListener('click', async () => {
-    await loadSideFromFile(state.side);
+  elements.newProject.addEventListener('click', async () => {
+    await createNewProject();
   });
 
   elements.importSide.addEventListener('click', () => {
@@ -2396,6 +3522,33 @@ function bindEvents() {
   });
 
   elements.exportSide.addEventListener('click', exportCurrentSide);
+  elements.openGroups.addEventListener('click', () => {
+    openGroupsModal();
+  });
+  elements.groupsClose.addEventListener('click', () => {
+    closeGroupsModal();
+  });
+  elements.groupsModal.addEventListener('click', (event) => {
+    if (event.target === elements.groupsModal) closeGroupsModal();
+  });
+  elements.groupCreate.addEventListener('click', createGroup);
+  elements.groupDelete.addEventListener('click', deleteSelectedGroup);
+  elements.groupSave.addEventListener('click', saveSelectedGroupDetails);
+  elements.groupName.addEventListener('input', () => {
+    applySelectedGroupForm({ save: true, announce: false, rerender: false });
+  });
+  elements.groupOrder.addEventListener('change', () => {
+    applySelectedGroupForm({ save: true, announce: false, rerender: true });
+  });
+  elements.groupDefaultOn.addEventListener('change', () => {
+    applySelectedGroupForm({ save: true, announce: false, rerender: false });
+  });
+  elements.groupAddNet.addEventListener('click', addNetIdsToSelectedGroup);
+  elements.groupRemoveNet.addEventListener('click', removeNetIdsFromSelectedGroup);
+  elements.groupsList.addEventListener('change', () => {
+    state.selectedGroupId = String(elements.groupsList.value || '');
+    renderGroupsModal();
+  });
 
   elements.zoomReset.addEventListener('click', () => {
     state.zoom = 1;
@@ -2414,6 +3567,7 @@ function bindEvents() {
 
   elements.applyMeta.addEventListener('click', applyMetaToSelected);
   elements.deletePath.addEventListener('click', deleteSelectedPath);
+  elements.mergePaths.addEventListener('click', mergeSelectedPaths);
   elements.undoEdit.addEventListener('click', () => {
     undoLastEdit({ announce: true });
   });
@@ -2425,8 +3579,34 @@ function bindEvents() {
   elements.menuDeleteNode.addEventListener('click', deleteNodeFromMenu);
 
   elements.pathList.addEventListener('change', () => {
-    const uid = elements.pathList.value;
-    if (uid) selectPath(uid);
+    const selected = Array.from(elements.pathList.selectedOptions)
+      .map((option) => option.value)
+      .filter(Boolean);
+    const uids = normalizeSelectedUids(selected);
+    if (!uids.length) {
+      state.selectedUids = state.selectedUid ? [state.selectedUid] : [];
+      refreshPathList();
+      renderOverlay();
+      saveDraft();
+      return;
+    }
+
+    state.selectedUids = uids;
+    const nextPrimary = uids.includes(state.selectedUid) ? state.selectedUid : uids[0];
+    if (nextPrimary !== state.selectedUid) {
+      state.selectedUid = nextPrimary;
+      state.selectedAnchorIndex = null;
+      state.selectedHoleIndex = null;
+    }
+
+    const path = activePath();
+    if (path) {
+      assignFormDefaults(path);
+      ensurePathVisible(path);
+    }
+    refreshPathList();
+    renderOverlay();
+    saveDraft();
   });
 
   elements.overlay.addEventListener('contextmenu', (event) => {
@@ -2684,9 +3864,14 @@ function bindEvents() {
   });
 
   document.addEventListener('keydown', (event) => {
-    if (editableTarget(event.target)) return;
-
     const key = event.key.toLowerCase();
+    const listFocused = pathListTarget(event.target);
+    if (key === 'escape' && groupsModalOpen()) {
+      event.preventDefault();
+      closeGroupsModal();
+      return;
+    }
+    if (editableTarget(event.target) && !listFocused) return;
     const wantsUndo = key === 'z' && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
     if (wantsUndo) {
       event.preventDefault();
@@ -2699,14 +3884,45 @@ function bindEvents() {
       return;
     }
 
-    if (key === 'v') setTool('select');
-    if (key === 'p') setTool('polygon');
-    if (key === 'x') setTool('subtract');
-    if (key === 'l') setTool('line');
-    if (key === 'm') setTool('magnet');
-    if (key === 'h') setTool('pan');
-    if (key === 'b') toggleBezierSelected();
+    if (key === 'v') {
+      event.preventDefault();
+      setTool('select');
+      return;
+    }
+    if (key === 'p') {
+      event.preventDefault();
+      setTool('polygon');
+      return;
+    }
+    if (key === 'x') {
+      event.preventDefault();
+      setTool('subtract');
+      return;
+    }
+    if (key === 'l') {
+      event.preventDefault();
+      setTool('line');
+      return;
+    }
+    if (key === 'm') {
+      event.preventDefault();
+      setTool('magnet');
+      return;
+    }
+    if (key === 'h') {
+      event.preventDefault();
+      setTool('pan');
+      return;
+    }
+    if (key === 'b') {
+      event.preventDefault();
+      toggleBezierSelected();
+      return;
+    }
     if (key === 'i') {
+      if (listFocused) {
+        event.preventDefault();
+      }
       if (state.drawing && normalizePathKind(state.tool) === 'line') {
         event.preventDefault();
         const fallback = state.drawPoints[state.drawPoints.length - 1] || null;
@@ -2721,7 +3937,7 @@ function bindEvents() {
     }
     if (key === 'delete' || key === 'backspace') {
       const active = document.activeElement;
-      if (!editableTarget(active)) {
+      if (!editableTarget(active) || pathListTarget(active)) {
         event.preventDefault();
         deleteSelectedPath();
       }
@@ -2797,6 +4013,8 @@ async function init() {
   }
 
   ensureSelectedPath();
+  ensureSelectedGroup();
+  applyHelpPanels();
   syncNetColorFromSelection();
   setDebugFillOpacity(state.debugFillOpacity, { save: false, announce: false });
   if (state.selectedUid) assignFormDefaults(activePath());

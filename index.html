@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="./pm-favicon.png">
     <title>PCB X-ray</title>
     <style>
       :root {
@@ -19,6 +20,7 @@
 
       * {
         user-select: none;
+        box-sizing: border-box;
       }
 
       body {
@@ -50,6 +52,7 @@
         width: 1765px;
         height: 1765px;
         transform-origin: 0 0;
+        isolation: isolate;
       }
 
       #scene img,
@@ -73,10 +76,14 @@
         margin: 0;
         padding: 12px;
         user-select: none;
-        background: rgba(5, 10, 18, 0.72);
+        background: rgba(5, 10, 18, 1);
         border: 1px solid rgba(255, 255, 255, 0.15);
-        border-radius: 10px;
+        border-bottom-right-radius: 10px;
         max-width: min(300px, calc(100vw - 24px));
+
+        &>li {
+          margin-bottom: 20px;
+        }
       }
 
       .allow {
@@ -90,21 +97,24 @@
       .net-path {
         stroke-linejoin: round;
         stroke-linecap: round;
+        paint-order: fill stroke;
       }
 
-      .net-path.is-hover,
-      .net-path.is-selected {
-        filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.8));
+      .net-path.has-contrast-ring {
+        filter: drop-shadow(0 0 1.1px var(--ring-color, rgba(232, 242, 255, 0.92)));
       }
 
-      .net-path.is-selected {
-        stroke-width: calc(var(--stroke-width, 1) + 1.25px);
+      :root:not(.has-pinned-path) .net-path:hover,
+      .net-path.is-pinned {
+        stroke: var(--highlight-stroke, #ffffff);
+        stroke-width: calc(var(--stroke-width, 1px) + 0.5px);
+        stroke-opacity: 1;
       }
 
-      .net-hit {
-        fill: none;
-        stroke: transparent;
-        pointer-events: stroke;
+      .net-path.is-legend-hover {
+        stroke: var(--highlight-stroke, #ffffff);
+        stroke-width: calc(var(--stroke-width, 1px) + 0.5px);
+        stroke-opacity: 1;
       }
 
       #download,
@@ -129,18 +139,12 @@
         list-style: none;
         display: grid;
         gap: 4px;
-        max-height: min(40vh, 320px);
-        overflow: auto;
       }
 
       #legend-list li {
-        display: grid;
-        grid-template-columns: 16px 16px 1fr;
-        gap: 8px;
-        align-items: center;
         font-size: 0.85rem;
         line-height: 1.3;
-        padding: 4px 6px;
+        padding: 0;
         border-radius: 6px;
       }
 
@@ -148,22 +152,73 @@
         background: rgba(255, 255, 255, 0.12);
       }
 
+      #legend-list li:not(.legend-group-title):hover {
+        background: rgba(255, 255, 255, 0.12);
+      }
+
       #legend-list li.is-hidden {
         opacity: 0.55;
       }
 
-      .legend-toggle {
-        margin: 0;
-        width: 14px;
-        height: 14px;
-        accent-color: #7ed8ff;
+      small {
+        color: #9ab0d1;
       }
 
-      .legend-swatch {
+      #legend-list li.legend-group-title {
+        font-size: 0.72rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #9ab0d1;
+        opacity: 0.9;
+        padding: 2px 0;
+      }
+
+      .legend-group-toggle {
+        width: 100%;
+        text-align: left;
+        border: 0;
+        background: rgba(255, 255, 255, 0.04);
+        color: inherit;
+        padding: 6px;
+        border-radius: 6px;
+        font: inherit;
+        letter-spacing: inherit;
+        text-transform: inherit;
+      }
+
+      .legend-group-toggle:hover {
+        background: rgba(121, 211, 255, 0.14);
+      }
+
+      .legend-row {
+        display: grid;
+        grid-template-columns: 16px 1fr;
+        gap: 8px;
+        align-items: center;
+        width: 100%;
+        padding: 4px 6px;
+        cursor: pointer;
+      }
+
+      .legend-toggle {
         width: 12px;
         height: 12px;
+        margin: 0;
         border-radius: 999px;
-        border: 1px solid rgba(255, 255, 255, 0.45);
+        border: 1.5px solid var(--swatch-color, rgba(255, 255, 255, 0.7));
+        background: transparent;
+        appearance: none;
+        -webkit-appearance: none;
+        cursor: pointer;
+      }
+
+      .legend-toggle:checked {
+        background: var(--swatch-color, transparent);
+      }
+
+      .legend-toggle:focus-visible {
+        outline: 2px solid #e8f2ff;
+        outline-offset: 2px;
       }
 
       #legend-empty {
@@ -171,21 +226,41 @@
         color: #b7c2d8;
         margin-top: 4px;
       }
+
+      #help summary {
+        cursor: pointer;
+      }
+
+      .help-copy {
+        margin-top: 4px;
+        color: #b7c2d8;
+        font-size: 0.85rem;
+        line-height: 1.35;
+      }
+
+      [data-net-key="gnd"] input {
+        border-color: rgba(255, 255, 255, 0.4);
+      }
     </style>
   </head>
 
   <body>
     <ul id="help">
-      <li><code>w</code>/<code>s</code> to move through layers
-        <br><input class="allow" type="range" value="5" min="0" max="5" id="layer">
-      <li><button class="allow" id="flip">flip</button> <button class="allow" id="reset-view">reset view</button>
-      <li>Wheel to zoom. Hold <code>space</code> and drag (or middle mouse) to pan.
-      <li>Double-click canvas to jump to the opposite-side paired layer.
-      <li class="allow">Layer opacity<br><input type="range" value="50" min="0" max="100" id="opacity">
       <li class="allow">
-        Net lines (click to highlight)
+        <details>
+          <summary>Help</summary>
+          <p class="help-copy">Wheel to zoom. Hold <code>space</code> and drag (or middle mouse) to pan.</p>
+          <p class="help-copy">Double-click canvas to jump to the opposite-side paired layer.</p>
+        </details>
+      </li>
+      <li class="allow"><code>w</code>/<code>s</code> to move through layers<br><input type="range" value="2" min="0"
+          max="5" id="layer"><br><button id="flip">flip</button> <button id="reset-view">reset view</button></li>
+      <li class="allow">Layer opacity<br><input type="range" value="50" min="0" max="100" id="opacity"></li>
+      <li class="allow">
+        Net lines <small>(click to highlight)</small>
         <p id="legend-empty">Loading net paths...</p>
         <ul id="legend-list"></ul>
+      </li>
     </ul>
 
     <main>

@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="./pm-favicon.png">
     <title>PCB Net Path Editor</title>
     <style>
       :root {
@@ -56,6 +57,37 @@
         gap: 8px;
       }
 
+      .group-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .help-toggle {
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        display: inline-grid;
+        place-items: center;
+        border-radius: 999px;
+        background: transparent;
+      }
+
+      .help-toggle svg {
+        width: 18px;
+        height: 18px;
+        fill: var(--muted);
+      }
+
+      .help-toggle[aria-pressed="true"] svg {
+        fill: #79d3ff;
+      }
+
+      .help-content[hidden] {
+        display: none;
+      }
+
       .row {
         display: grid;
         gap: 4px;
@@ -85,6 +117,10 @@
 
       button {
         cursor: pointer;
+      }
+
+      [disabled] {
+        color: rgba(232, 238, 252, 0.2);
       }
 
       .tool-grid {
@@ -238,6 +274,65 @@
         text-align: left;
       }
 
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 1400;
+        display: grid;
+        place-items: center;
+        background: rgba(5, 9, 16, 0.72);
+        padding: 20px;
+      }
+
+      .modal-backdrop[hidden] {
+        display: none;
+      }
+
+      .modal-panel {
+        width: min(760px, calc(100vw - 32px));
+        max-height: calc(100vh - 40px);
+        overflow: auto;
+        background: #10192a;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 12px;
+        display: grid;
+        gap: 10px;
+      }
+
+      .modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .modal-header h2 {
+        margin: 0;
+        font-size: 0.98rem;
+      }
+
+      .modal-grid {
+        display: grid;
+        grid-template-columns: 220px 1fr;
+        gap: 10px;
+      }
+
+      .modal-grid .row.inline {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .modal-list {
+        width: 100%;
+        min-height: 180px;
+      }
+
+      .modal-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
       @media (max-width: 980px) {
         .app {
           grid-template-columns: 1fr;
@@ -280,21 +375,28 @@
             </div>
           </div>
           <div class="row inline">
-            <button id="reload-side" title="Reload side SVG from /pm, replacing unsaved edits for this side">Reload SVG</button>
-            <button id="import-side" title="Import an SVG file into the current side (replaces unsaved edits for this side)">Import SVG</button>
             <button id="export-side" title="Download the current side as an SVG file">Export SVG</button>
-            <input id="import-side-file" type="file" accept=".svg,image/svg+xml" hidden>
-          </div>
-          <div class="row inline">
+            <button id="import-side" title="Import an SVG file into the current side (replaces unsaved edits for this side)">Import SVG</button>
+            <button id="open-groups" title="Open net groups manager">Groups</button>
             <button id="zoom-reset" title="Reset zoom and pan to defaults">Reset View</button>
+            <button id="new-project" title="Start a new empty project (clears all current work)">New Project</button>
             <label title="Mirror the canvas horizontally"><input id="mirror" type="checkbox"> Mirror</label>
+            <input id="import-side-file" type="file" accept=".svg,image/svg+xml" hidden>
           </div>
           <div class="small">Mouse wheel zoom. Hold <code>space</code> and drag to pan. Middle mouse also pans.</div>
           <div class="small" id="zoom-readout">Zoom: 1.00x</div>
         </div>
 
         <div class="group">
-          <div class="label">Tool</div>
+          <div class="group-head">
+            <div class="label">Tools</div>
+            <button id="tools-help-toggle" class="help-toggle" type="button" title="Toggle tools help" aria-label="Toggle tools help" aria-pressed="false">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                <title>help-circle-outline</title>
+                <path d="M11,18H13V16H11V18M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,6A4,4 0 0,0 8,10H10A2,2 0 0,1 12,8A2,2 0 0,1 14,10C14,12 11,11.75 11,15H13C13,12.75 16,12.5 16,10A4,4 0 0,0 12,6Z" />
+              </svg>
+            </button>
+          </div>
           <div class="tool-grid">
             <button data-tool="select" class="is-active" title="Select and inspect one net path">Select (V)</button>
             <button data-tool="polygon" title="Lasso-draw a closed polygon path for a new net">Polygon (P)</button>
@@ -303,19 +405,20 @@
             <button data-tool="magnet" title="Trace with point snapping to PCB edges from the current layer image">Magnet (M)</button>
             <button data-tool="pan" title="Pan the canvas by dragging">Pan (H)</button>
           </div>
-          <div class="small">Polygon mode: press and drag to lasso a shape. Release to create the net path.</div>
-          <div class="small">Subtract mode: select an area path, then drag to draw a hole cutout inside it (same SVG path, not a separate path).</div>
-          <div class="small">Line mode: drag to draw; press <code>I</code> while drawing to add via circles. Press <code>Esc</code> to finish.</div>
-          <div class="small">Magnet mode: drag to trace; points snap to nearby high-contrast PCB features.</div>
-          <div class="small">Select mode: drag anchors to reshape. Right-click path/anchor to add or delete nodes.</div>
-          <div class="small">Click an anchor to select it, then press <code>B</code> to toggle that node between corner/smooth.</div>
+          <div id="tools-help" class="help-content" hidden>
+            <div class="small">Polygon mode: press and drag to lasso a shape. Release to create the net path.</div>
+            <div class="small">Subtract mode: select an area path, then drag to draw a hole cutout inside it (same SVG path, not a separate path).</div>
+            <div class="small">Line mode: drag to draw; press <code>I</code> while drawing to add via circles. Press <code>Esc</code> to finish.</div>
+            <div class="small">Magnet mode: drag to trace; points snap to nearby high-contrast PCB features.</div>
+            <div class="small">Select mode: drag anchors to reshape. Right-click path/anchor to add or delete nodes.</div>
+            <div class="small">Click an anchor to select it, then press <code>B</code> to toggle that node between corner/smooth.</div>
+          </div>
         </div>
 
         <div class="group">
           <div class="row">
             <label for="net-id">Net id</label>
             <input id="net-id" placeholder="e.g. gnd or vcc_cart">
-            <div class="small">Export prefixes this with <code>front-</code> or <code>back-</code> automatically.</div>
           </div>
           <div class="row">
             <label for="net-label">Net label (legend)</label>
@@ -337,6 +440,7 @@
           <div class="row inline">
             <button id="apply-meta" title="Apply id/label/width to selected path, and apply net color to all paths with the same net id">Apply</button>
             <button id="delete-path" title="Delete the selected path from this side">Delete</button>
+            <button id="merge-paths" title="Merge selected paths from the list into one shape" disabled>Merge</button>
             <button id="undo-edit" title="Undo last edit on this side (Ctrl/Cmd+Z)">Undo</button>
             <button id="reset-path-curves" title="Set all nodes on the selected path to corner mode">Reset Curves</button>
           </div>
@@ -374,11 +478,22 @@
         </div>
 
         <div class="group">
-          <label for="path-list">Paths on current side</label>
-          <select id="path-list" size="8"></select>
-          <div class="small">Only the selected path is rendered in the canvas.</div>
-          <div class="small">Shortcuts: <code>[</code> previous path, <code>]</code> next path.</div>
-          <div class="small">Undo: <code>Ctrl/Cmd+Z</code> (last 100 edits, per side).</div>
+          <div class="group-head">
+            <label for="path-list">Paths on current side</label>
+            <button id="paths-help-toggle" class="help-toggle" type="button" title="Toggle paths help" aria-label="Toggle paths help" aria-pressed="false">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                <title>help-circle-outline</title>
+                <path d="M11,18H13V16H11V18M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,6A4,4 0 0,0 8,10H10A2,2 0 0,1 12,8A2,2 0 0,1 14,10C14,12 11,11.75 11,15H13C13,12.75 16,12.5 16,10A4,4 0 0,0 12,6Z" />
+              </svg>
+            </button>
+          </div>
+          <select id="path-list" size="8" multiple></select>
+          <div id="paths-help" class="help-content" hidden>
+            <div class="small">Only the selected path is rendered in the canvas.</div>
+            <div class="small">Use <code>Cmd/Ctrl</code> or <code>Shift</code> to multi-select, then click <code>Merge</code>.</div>
+            <div class="small">Shortcuts: <code>[</code> previous path, <code>]</code> next path.</div>
+            <div class="small">Undo: <code>Ctrl/Cmd+Z</code> (last 100 edits, per side).</div>
+          </div>
         </div>
 
         <div id="status" class="small"></div>
@@ -404,6 +519,56 @@
         <button id="menu-add-node" type="button" title="Insert a new node into the selected path">Add node</button>
         <button id="menu-delete-node" type="button" title="Delete the selected node">Delete node</button>
       </div>
+    </div>
+
+    <div id="groups-modal" class="modal-backdrop" hidden>
+      <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="groups-modal-title">
+        <header class="modal-header">
+          <h2 id="groups-modal-title">Net Groups</h2>
+          <button id="groups-close" type="button" title="Close groups manager">Close</button>
+        </header>
+        <div class="small">Group unique net ids, set display order, and choose whether each group is enabled by default in the viewer.</div>
+        <div class="modal-grid">
+          <div class="group">
+            <label for="groups-list">Groups</label>
+            <select id="groups-list" class="modal-list" size="10"></select>
+            <div class="modal-actions">
+              <button id="group-create" type="button" title="Create a new group">New Group</button>
+              <button id="group-delete" type="button" title="Delete selected group">Delete Group</button>
+            </div>
+          </div>
+          <div class="group">
+            <div class="row">
+              <label for="group-name">Group name</label>
+              <input id="group-name" type="text" placeholder="e.g. Power Rails">
+            </div>
+            <div class="row inline">
+              <div class="row">
+                <label for="group-order">Order</label>
+                <input id="group-order" type="number" step="1" value="0">
+              </div>
+              <label title="Should nets in this group be enabled initially in viewer?"><input id="group-default-on" type="checkbox"> Enabled by default</label>
+            </div>
+            <div class="row">
+              <button id="group-save" type="button" title="Save group details">Save Group Details</button>
+            </div>
+            <div class="row inline">
+              <div class="row">
+                <label for="group-net-available">Available net ids</label>
+                <select id="group-net-available" class="modal-list" size="8" multiple></select>
+              </div>
+              <div class="row">
+                <label for="group-net-members">Net ids in group</label>
+                <select id="group-net-members" class="modal-list" size="8" multiple></select>
+              </div>
+            </div>
+            <div class="modal-actions">
+              <button id="group-add-net" type="button" title="Add selected available net ids to this group">Add Selected Net IDs</button>
+              <button id="group-remove-net" type="button" title="Remove selected net ids from this group">Remove Selected Net IDs</button>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
 
     <script type="module" src="editor.js"></script>
