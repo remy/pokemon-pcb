@@ -36,6 +36,34 @@
 
       button {
         cursor: pointer;
+        background: transparent;
+      }
+
+      button[type="button"] {
+        color: #e8eefc;
+        background: black;
+        border: 1px solid rgba(174, 205, 242, 0.52);
+        border-radius: 10px;
+        padding: 6px 10px;
+        font: 600 0.82rem/1.1 inherit;
+        letter-spacing: 0.01em;
+        box-shadow: 0 1px 0 rgba(255, 255, 255, 0.16) inset, 0 8px 18px rgba(0, 0, 0, 0.25);
+        transition: transform 120ms ease, border-color 160ms ease, box-shadow 160ms ease;
+      }
+
+      button[type="button"]:hover {
+        border-color: rgba(198, 224, 255, 0.72);
+        transform: translateY(-1px);
+      }
+
+      button[type="button"]:active {
+        transform: translateY(0);
+        box-shadow: 0 1px 0 rgba(255, 255, 255, 0.12) inset, 0 4px 10px rgba(0, 0, 0, 0.24);
+      }
+
+      button[type="button"]:focus-visible {
+        outline: 2px solid #95d2ff;
+        outline-offset: 2px;
       }
 
       #viewport {
@@ -80,10 +108,28 @@
         border: 1px solid rgba(255, 255, 255, 0.15);
         border-bottom-right-radius: 10px;
         max-width: min(300px, calc(100vw - 24px));
+      }
 
-        &>li {
-          margin-bottom: 20px;
-        }
+      #help>li {
+        margin-bottom: 20px;
+      }
+
+      #help>li:last-child {
+        margin-bottom: 0;
+      }
+
+      .help-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      #help-open {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        z-index: 110;
       }
 
       .allow {
@@ -117,21 +163,6 @@
         stroke-opacity: 1;
       }
 
-      #download,
-      #edit {
-        position: absolute;
-        margin: 20px;
-        bottom: 0;
-        z-index: 120;
-      }
-
-      #download {
-        right: 0;
-      }
-
-      #edit {
-        right: 140px;
-      }
 
       #legend-list {
         margin: 6px 0 0;
@@ -174,13 +205,13 @@
       }
 
       .legend-group-toggle {
+        padding: 8px;
         width: 100%;
         text-align: left;
         border: 0;
+        border-radius: 4px;
         background: rgba(255, 255, 255, 0.04);
         color: inherit;
-        padding: 6px;
-        border-radius: 6px;
         font: inherit;
         letter-spacing: inherit;
         text-transform: inherit;
@@ -241,20 +272,48 @@
       [data-net-key="gnd"] input {
         border-color: rgba(255, 255, 255, 0.4);
       }
+
+      .links a {
+        color: inherit;
+        display: block;
+        margin-bottom: 6px;
+
+        &:hover {
+          color: white;
+        }
+      }
+
+
+      input[type="range"] {
+        width: 100%;
+        margin: 4px 0;
+      }
+
+      details[open] {
+        border-bottom: 1px solid rgba(121, 211, 255, 0.14);
+      }
     </style>
   </head>
 
   <body>
     <ul id="help">
+      <li class="allow help-head"><strong>Controls</strong> <button id="help-close" type="button">Hide</button></li>
       <li class="allow">
         <details>
           <summary>Help</summary>
           <p class="help-copy">Wheel to zoom. Hold <code>space</code> and drag (or middle mouse) to pan.</p>
           <p class="help-copy">Double-click canvas to jump to the opposite-side paired layer.</p>
+          <p class="help-copy">Use <code>w</code>/<code>s</code> to move through layers.</p>
+          <p class="help-copy links">
+
+            <a id="edit" href="./editor.html">Open net editor</a>
+            <a id="download" href="./pm/pm-layers.psd">Download .psd</a>
+          </p>
+
         </details>
       </li>
-      <li class="allow"><code>w</code>/<code>s</code> to move through layers<br><input type="range" value="2" min="0"
-          max="5" id="layer"><br><button id="flip">flip</button> <button id="reset-view">reset view</button></li>
+      <li class="allow">Visible layer<br><input type="range" value="2" min="0" max="5" id="layer"><br><button
+          type="button" id="flip">flip</button> <button type="button" id="reset-view">reset view</button></li>
       <li class="allow">Layer opacity<br><input type="range" value="50" min="0" max="100" id="opacity"></li>
       <li class="allow">
         Net lines <small>(click to highlight)</small>
@@ -262,14 +321,13 @@
         <ul id="legend-list"></ul>
       </li>
     </ul>
+    <button id="help-open" class="allow" type="button" hidden>Show controls</button>
 
     <main>
       <div id="viewport">
         <div id="scene"></div>
       </div>
     </main>
-    <a id="edit" href="./editor.html">Open net editor</a>
-    <a id="download" href="./pm/pm-layers.psd">Download .psd</a>
     <script type="module" src="app.js"></script>
   </body>
 

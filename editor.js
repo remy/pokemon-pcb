@@ -1663,6 +1663,41 @@ function selectedPathUids() {
   return [];
 }
 
+function ensurePrimarySelection() {
+  const paths = currentPaths();
+  if (!paths.length) {
+    state.selectedUid = null;
+    state.selectedUids = [];
+    return null;
+  }
+
+  const selected = normalizeSelectedUids(state.selectedUids);
+  const valid = new Set(paths.map((path) => path.uid));
+  const hasPrimary = !!state.selectedUid && valid.has(state.selectedUid);
+
+  if (hasPrimary) {
+    if (!selected.length) {
+      state.selectedUids = [state.selectedUid];
+    } else if (!selected.includes(state.selectedUid)) {
+      state.selectedUids = [state.selectedUid, ...selected];
+    } else {
+      state.selectedUids = selected;
+    }
+    return state.selectedUid;
+  }
+
+  const fallbackUid = selected[0] || paths[0].uid;
+  state.selectedUid = fallbackUid;
+  if (!selected.length) {
+    state.selectedUids = [fallbackUid];
+  } else if (!selected.includes(fallbackUid)) {
+    state.selectedUids = [fallbackUid, ...selected];
+  } else {
+    state.selectedUids = selected;
+  }
+  return fallbackUid;
+}
+
 function updateMergeButtonState() {
   if (!elements.mergePaths) return;
   elements.mergePaths.disabled = selectedPathUids().length < 2;
@@ -2032,24 +2067,19 @@ function applyColorToNet(netId, color, options = {}) {
 }
 
 function activePath() {
-  if (!state.selectedUid) return null;
-  return currentPaths().find((entry) => entry.uid === state.selectedUid) || null;
+  const uid = ensurePrimarySelection();
+  if (!uid) return null;
+  return currentPaths().find((entry) => entry.uid === uid) || null;
 }
 
 function ensureSelectedPath() {
-  const paths = currentPaths();
-  if (!paths.length) {
-    state.selectedUid = null;
-    state.selectedUids = [];
+  const selectedUid = ensurePrimarySelection();
+  if (!selectedUid) {
     state.selectedAnchorIndex = null;
     state.selectedHoleIndex = null;
     return;
   }
 
-  if (!state.selectedUid || !paths.some((entry) => entry.uid === state.selectedUid)) {
-    state.selectedUid = paths[0].uid;
-  }
-  state.selectedUids = state.selectedUid ? [state.selectedUid] : [];
   state.selectedAnchorIndex = null;
   state.selectedHoleIndex = null;
 
@@ -3211,6 +3241,7 @@ async function loadSideFromFile(side) {
 
     if (side === state.side) {
       state.selectedUid = null;
+      state.selectedUids = [];
       state.selectedAnchorIndex = null;
       state.selectedHoleIndex = null;
       syncNetColorFromSelection();
@@ -3686,9 +3717,9 @@ function bindEvents() {
       return;
     }
 
-    state.selectedUid = null;
     state.selectedAnchorIndex = null;
     state.selectedHoleIndex = null;
+    ensurePrimarySelection();
     refreshPathList();
     renderOverlay();
     saveDraft();

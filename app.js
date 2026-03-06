@@ -10,6 +10,9 @@ const scene = document.querySelector('#scene');
 const layerSelect = document.querySelector('#layer');
 const legendList = document.querySelector('#legend-list');
 const legendEmpty = document.querySelector('#legend-empty');
+const helpPanel = document.querySelector('#help');
+const helpCloseButton = document.querySelector('#help-close');
+const helpOpenButton = document.querySelector('#help-open');
 
 const layers = {};
 const netState = {
@@ -29,6 +32,10 @@ const netState = {
 
 const interactionState = {
   pendingNetSelectTimer: null,
+  touchPoints: new Map(),
+  pinch: null,
+  suppressViewportClick: false,
+  suppressViewportClickTimer: null,
 };
 
 const viewState = {
@@ -43,6 +50,17 @@ const viewState = {
 function editableTarget(target) {
   if (!(target instanceof HTMLElement)) return false;
   return ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(target.tagName);
+}
+
+function suppressViewportClickOnce() {
+  interactionState.suppressViewportClick = true;
+  if (interactionState.suppressViewportClickTimer) {
+    clearTimeout(interactionState.suppressViewportClickTimer);
+  }
+  interactionState.suppressViewportClickTimer = setTimeout(() => {
+    interactionState.suppressViewportClick = false;
+    interactionState.suppressViewportClickTimer = null;
+  }, 400);
 }
 
 function updateSceneTransform() {
@@ -86,6 +104,19 @@ function zoomAt(clientX, clientY, nextZoom) {
   updateSceneTransform();
 }
 
+function touchDistance(a, b) {
+  const dx = b.clientX - a.clientX;
+  const dy = b.clientY - a.clientY;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function touchMidpoint(a, b) {
+  return {
+    clientX: (a.clientX + b.clientX) / 2,
+    clientY: (a.clientY + b.clientY) / 2,
+  };
+}
+
 function toggleFlip() {
   viewState.flip = !viewState.flip;
   updateSceneTransform();
@@ -107,6 +138,17 @@ document.querySelector('#flip').onclick = () => {
 document.querySelector('#reset-view').onclick = () => {
   resetView();
 };
+
+if (helpCloseButton && helpPanel && helpOpenButton) {
+  helpCloseButton.onclick = () => {
+    helpPanel.hidden = true;
+    helpOpenButton.hidden = false;
+  };
+  helpOpenButton.onclick = () => {
+    helpPanel.hidden = false;
+    helpOpenButton.hidden = true;
+  };
+}
 
 let visible = null;
 
@@ -183,6 +225,39 @@ viewport.addEventListener(
 );
 
 viewport.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'touch') {
+    interactionState.touchPoints.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+    viewport.setPointerCapture(e.pointerId);
+
+    if (interactionState.touchPoints.size === 1) {
+      viewState.panning = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        originX: viewState.panX,
+        originY: viewState.panY,
+        moved: false,
+      };
+      interactionState.pinch = null;
+      return;
+    }
+
+    if (interactionState.touchPoints.size >= 2) {
+      const points = Array.from(interactionState.touchPoints.values());
+      const a = points[0];
+      const b = points[1];
+      const mid = touchMidpoint(a, b);
+      interactionState.pinch = {
+        startDistance: Math.max(1, touchDistance(a, b)),
+        startZoom: viewState.zoom,
+        lastMidX: mid.clientX,
+        lastMidY: mid.clientY,
+      };
+      viewState.panning = null;
+    }
+    return;
+  }
+
   const shouldPan = viewState.isSpaceDown || e.button === 1;
   if (!shouldPan) return;
   e.preventDefault();
@@ -193,32 +268,107 @@ viewport.addEventListener('pointerdown', (e) => {
     startY: e.clientY,
     originX: viewState.panX,
     originY: viewState.panY,
+    moved: false,
   };
   viewport.setPointerCapture(e.pointerId);
 });
 
 viewport.addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'touch' && interactionState.touchPoints.has(e.pointerId)) {
+    interactionState.touchPoints.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
+  }
+
+  if (interactionState.pinch && interactionState.touchPoints.size >= 2) {
+    const points = Array.from(interactionState.touchPoints.values());
+    const a = points[0];
+    const b = points[1];
+    const distance = Math.max(1, touchDistance(a, b));
+    const midpoint = touchMidpoint(a, b);
+    const zoom = interactionState.pinch.startZoom * (distance / interactionState.pinch.startDistance);
+    zoomAt(midpoint.clientX, midpoint.clientY, zoom);
+    const deltaX = midpoint.clientX - interactionState.pinch.lastMidX;
+    const deltaY = midpoint.clientY - interactionState.pinch.lastMidY;
+    if (Math.abs(deltaX) > 0.01 || Math.abs(deltaY) > 0.01) {
+      viewState.panX += deltaX;
+      viewState.panY += deltaY;
+      updateSceneTransform();
+    }
+    interactionState.pinch.lastMidX = midpoint.clientX;
+    interactionState.pinch.lastMidY = midpoint.clientY;
+    suppressViewportClickOnce();
+    return;
+  }
+
   if (!viewState.panning || viewState.panning.pointerId !== e.pointerId) return;
   const dx = e.clientX - viewState.panning.startX;
   const dy = e.clientY - viewState.panning.startY;
   viewState.panX = viewState.panning.originX + dx;
   viewState.panY = viewState.panning.originY + dy;
+  if (!viewState.panning.moved && Math.sqrt(dx * dx + dy * dy) > 3) {
+    viewState.panning.moved = true;
+    suppressViewportClickOnce();
+  }
   updateSceneTransform();
 });
 
 viewport.addEventListener('pointerup', (e) => {
+  if (e.pointerType === 'touch') {
+    interactionState.touchPoints.delete(e.pointerId);
+    if (interactionState.pinch && interactionState.touchPoints.size < 2) {
+      interactionState.pinch = null;
+      if (interactionState.touchPoints.size === 1) {
+        const [pointerId, point] = Array.from(interactionState.touchPoints.entries())[0];
+        viewState.panning = {
+          pointerId,
+          startX: point.clientX,
+          startY: point.clientY,
+          originX: viewState.panX,
+          originY: viewState.panY,
+          moved: false,
+        };
+      } else {
+        viewState.panning = null;
+      }
+    } else if (viewState.panning && viewState.panning.pointerId === e.pointerId) {
+      viewState.panning = null;
+    }
+    try {
+      viewport.releasePointerCapture(e.pointerId);
+    } catch {
+      // no-op
+    }
+    return;
+  }
+
   if (!viewState.panning || viewState.panning.pointerId !== e.pointerId) return;
   viewState.panning = null;
   viewport.releasePointerCapture(e.pointerId);
 });
 
 viewport.addEventListener('pointercancel', (e) => {
-  if (!viewState.panning || viewState.panning.pointerId !== e.pointerId) return;
-  viewState.panning = null;
-  viewport.releasePointerCapture(e.pointerId);
+  if (e.pointerType === 'touch') {
+    interactionState.touchPoints.delete(e.pointerId);
+    interactionState.pinch = null;
+  }
+  if (viewState.panning && viewState.panning.pointerId === e.pointerId) {
+    viewState.panning = null;
+  }
+  try {
+    viewport.releasePointerCapture(e.pointerId);
+  } catch {
+    // no-op
+  }
 });
 
 viewport.addEventListener('click', (event) => {
+  if (interactionState.suppressViewportClick) {
+    interactionState.suppressViewportClick = false;
+    if (interactionState.suppressViewportClickTimer) {
+      clearTimeout(interactionState.suppressViewportClickTimer);
+      interactionState.suppressViewportClickTimer = null;
+    }
+    return;
+  }
   if (event.detail > 1) return;
   const path = event.target.closest('.net-path[data-net-id]');
   if (path) return;
@@ -750,7 +900,7 @@ function updateLegend() {
       const heading = document.createElement('li');
       heading.className = 'legend-group-title';
       const button = document.createElement('button');
-      button.type = 'button';
+      button.type = 'title';
       button.className = 'legend-group-toggle';
       const allVisible = section.rows.every((row) => row.visible);
       button.title = allVisible ? 'Hide all nets in this group' : 'Show all nets in this group';

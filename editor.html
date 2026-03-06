@@ -139,6 +139,10 @@
         color: var(--muted);
       }
 
+      .is-hidden-ui {
+        display: none !important;
+      }
+
       #status {
         min-height: 2.2em;
         font-size: 0.78rem;
@@ -402,14 +406,14 @@
             <button data-tool="polygon" title="Lasso-draw a closed polygon path for a new net">Polygon (P)</button>
             <button data-tool="subtract" title="Draw a closed cutout shape and subtract it from the selected area path">Subtract (X)</button>
             <button data-tool="line" title="Draw a freehand line net and drop via circles with I while drawing">Line (L)</button>
-            <button data-tool="magnet" title="Trace with point snapping to PCB edges from the current layer image">Magnet (M)</button>
+            <button class="is-hidden-ui" data-tool="magnet" title="Trace with point snapping to PCB edges from the current layer image">Magnet (M)</button>
             <button data-tool="pan" title="Pan the canvas by dragging">Pan (H)</button>
           </div>
           <div id="tools-help" class="help-content" hidden>
             <div class="small">Polygon mode: press and drag to lasso a shape. Release to create the net path.</div>
             <div class="small">Subtract mode: select an area path, then drag to draw a hole cutout inside it (same SVG path, not a separate path).</div>
             <div class="small">Line mode: drag to draw; press <code>I</code> while drawing to add via circles. Press <code>Esc</code> to finish.</div>
-            <div class="small">Magnet mode: drag to trace; points snap to nearby high-contrast PCB features.</div>
+            <div class="small is-hidden-ui">Magnet mode: drag to trace; points snap to nearby high-contrast PCB features.</div>
             <div class="small">Select mode: drag anchors to reshape. Right-click path/anchor to add or delete nodes.</div>
             <div class="small">Click an anchor to select it, then press <code>B</code> to toggle that node between corner/smooth.</div>
           </div>
@@ -461,7 +465,7 @@
             <button id="simplify-path" title="Reduce anchor point count on selected path">Simplify Path</button>
             <button id="smooth-path" title="Smooth selected path geometry">Smooth Path</button>
           </div>
-          <div class="row inline">
+          <div class="row inline is-hidden-ui">
             <div class="row">
               <label for="magnet-radius">Magnet radius (px)</label>
               <input id="magnet-radius" type="number" min="2" max="60" step="1" value="10">
@@ -471,7 +475,7 @@
               <input id="magnet-threshold" type="number" min="1" max="255" step="1" value="35">
             </div>
           </div>
-          <div class="row">
+          <div class="row is-hidden-ui">
             <label for="magnet-strength">Magnet strength</label>
             <input id="magnet-strength" type="number" min="0.2" max="5" step="0.1" value="1.6">
           </div>
