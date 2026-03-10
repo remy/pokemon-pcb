@@ -253,6 +253,10 @@ function hasActivePointerInteraction() {
   return !!(state.panning || state.drawing || state.anchorDrag);
 }
 
+function setAnchorDragCursor(hidden) {
+  document.body.classList.toggle('is-anchor-dragging', !!hidden);
+}
+
 function applyAnchorScreenScale(node, x, y) {
   const inv = 1 / zoomSafe();
   const cx = Number(x);
@@ -1541,7 +1545,7 @@ function restoreDraft() {
     state.layerImage = clamp(parseInt(data.layerImage, 10) || 1, 1, 6);
     elements.layerImage.value = String(state.layerImage);
 
-    const validTools = ['select', 'polygon', 'subtract', 'line', 'magnet', 'pan'];
+    const validTools = ['select', 'polygon', 'subtract', 'line', 'magnet'];
     state.tool = validTools.includes(data.tool) ? data.tool : 'select';
 
     state.zoom = clamp(parseFloat(data.zoom) || 1, 0.25, 40);
@@ -1624,7 +1628,7 @@ function restoreDraft() {
       elements.debugFillOpacity.value = debugFillOpacity.toFixed(2);
       elements.debugFillOpacityReadout.textContent = debugFillOpacity.toFixed(2);
       elements.strokeWidth.value = String(data.form.strokeWidth || '1');
-      elements.simplifyEpsilon.value = String(data.form.simplifyEpsilon || '3');
+      elements.simplifyEpsilon.value = String(data.form.simplifyEpsilon || '1.6');
       elements.smoothStrength.value = String(data.form.smoothStrength || '0.25');
       elements.magnetRadius.value = String(data.form.magnetRadius || '10');
       elements.magnetThreshold.value = String(data.form.magnetThreshold || '35');
@@ -2207,7 +2211,12 @@ function loadBaseImage() {
 
 function setTool(tool, options = {}) {
   const { save = true, announce = true } = options;
-  if (!['select', 'polygon', 'subtract', 'line', 'magnet', 'pan'].includes(tool)) return;
+  if (!['select', 'polygon', 'subtract', 'line', 'magnet'].includes(tool)) return;
+
+  if (state.anchorDrag) {
+    state.anchorDrag = null;
+    setAnchorDragCursor(false);
+  }
 
   state.tool = tool;
   state.drawPoints = [];
@@ -2891,7 +2900,7 @@ function simplifySelectedPath() {
     return;
   }
 
-  const epsilon = clamp(parseFloat(elements.simplifyEpsilon.value) || 3, 0.1, 50);
+  const epsilon = clamp(parseFloat(elements.simplifyEpsilon.value) || 1.6, 0.1, 50);
   const before = contour.points.length;
   const simplified = isLine
     ? simplifyRdpOpen(contour.points, epsilon).map((point) => [point[0], point[1]])
@@ -3291,6 +3300,7 @@ async function createNewProject() {
   state.drawVias = [];
   state.drawing = null;
   state.anchorDrag = null;
+  setAnchorDragCursor(false);
   state.panning = null;
   state.lastPointerPoint = null;
   state.suppressOverlayClick = false;
@@ -3320,7 +3330,7 @@ async function createNewProject() {
   elements.color.value = '#ffe05e';
   elements.strokeWidth.value = '1';
   setDebugFillOpacity(0.18, { save: false, announce: false });
-  elements.simplifyEpsilon.value = '3';
+  elements.simplifyEpsilon.value = '1.6';
   elements.smoothStrength.value = '0.25';
   elements.magnetRadius.value = '10';
   elements.magnetThreshold.value = '35';
@@ -3729,7 +3739,7 @@ function bindEvents() {
     hideNodeMenu();
     if (event.button !== 0) return;
 
-    const shouldPan = state.tool === 'pan' || state.isSpaceDown;
+    const shouldPan = state.isSpaceDown;
     if (shouldPan) return;
 
     const anchorTarget = event.target.closest('[data-anchor-index][data-uid]');
@@ -3750,6 +3760,7 @@ function bindEvents() {
           pointerId: event.pointerId,
           undoRecorded: false,
         };
+        setAnchorDragCursor(true);
 
         elements.overlay.setPointerCapture(event.pointerId);
         renderOverlay();
@@ -3808,6 +3819,7 @@ function bindEvents() {
     if (state.anchorDrag && state.anchorDrag.pointerId === event.pointerId) {
       elements.overlay.releasePointerCapture(event.pointerId);
       state.anchorDrag = null;
+      setAnchorDragCursor(false);
       state.suppressOverlayClick = true;
       saveDraft();
       return;
@@ -3843,7 +3855,7 @@ function bindEvents() {
 
   elements.viewport.addEventListener('pointerdown', (event) => {
     hideNodeMenu();
-    const shouldPan = state.tool === 'pan' || state.isSpaceDown || event.button === 1;
+    const shouldPan = state.isSpaceDown || event.button === 1;
     if (!shouldPan) return;
     event.preventDefault();
 
@@ -3940,11 +3952,6 @@ function bindEvents() {
       setTool('magnet');
       return;
     }
-    if (key === 'h') {
-      event.preventDefault();
-      setTool('pan');
-      return;
-    }
     if (key === 'b') {
       event.preventDefault();
       toggleBezierSelected();
@@ -3997,6 +4004,7 @@ function bindEvents() {
       state.drawVias = [];
       state.drawing = null;
       state.anchorDrag = null;
+      setAnchorDragCursor(false);
       renderOverlay();
       setStatus('Cancelled current draft action.');
     }
@@ -4033,6 +4041,7 @@ function bindEvents() {
 
 async function init() {
   bindEvents();
+  setAnchorDragCursor(false);
 
   const restored = restoreDraft();
   normalizeLayerForSide();

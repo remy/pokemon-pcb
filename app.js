@@ -4,10 +4,14 @@ function setVar(el, prop, val) {
 
 const NET_SIDES = ['front', 'back'];
 const CANVAS_SIZE = 1765;
+const VIEWER_STORAGE_KEY = 'pcb-xray-viewer-v1';
 
 const viewport = document.querySelector('#viewport');
 const scene = document.querySelector('#scene');
 const layerSelect = document.querySelector('#layer');
+const opacityInput = document.querySelector('#opacity');
+const flipButton = document.querySelector('#flip');
+const resetViewButton = document.querySelector('#reset-view');
 const legendList = document.querySelector('#legend-list');
 const legendEmpty = document.querySelector('#legend-empty');
 const helpPanel = document.querySelector('#help');
@@ -47,6 +51,75 @@ const viewState = {
   panning: null,
 };
 
+let viewerSaveTimer = null;
+let suspendViewerStateSave = true;
+
+function clampNumber(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function parseViewerStorage() {
+  try {
+    const raw = localStorage.getItem(VIEWER_STORAGE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') return null;
+
+    const hiddenRaw = Array.isArray(data.hiddenNetKeys) ? data.hiddenNetKeys : null;
+    const hiddenNetKeys = hiddenRaw
+      ? hiddenRaw.map((key) => visibilityKey(key)).filter(Boolean)
+      : [];
+
+    return {
+      layerIndex: clampNumber(parseInt(data.layerIndex, 10), 0, 5, 2),
+      opacity: clampNumber(parseInt(data.opacity, 10), 0, 100, 50),
+      zoom: clampNumber(data.zoom, 0.05, 40, null),
+      panX: Number.isFinite(data.panX) ? Number(data.panX) : null,
+      panY: Number.isFinite(data.panY) ? Number(data.panY) : null,
+      flip: data.flip === false ? false : true,
+      helpHidden: data.helpHidden === true,
+      selectedNetId: typeof data.selectedNetId === 'string' ? data.selectedNetId : null,
+      hasHiddenNetKeys: Array.isArray(hiddenRaw),
+      hiddenNetKeys: Array.from(new Set(hiddenNetKeys)),
+    };
+  } catch (error) {
+    console.warn('Could not parse saved viewer state', error);
+    return null;
+  }
+}
+
+const restoredViewerState = parseViewerStorage();
+
+function queueViewerStateSave(delay = 120) {
+  if (suspendViewerStateSave) return;
+  if (viewerSaveTimer) clearTimeout(viewerSaveTimer);
+  viewerSaveTimer = setTimeout(() => {
+    viewerSaveTimer = null;
+    if (suspendViewerStateSave) return;
+    try {
+      const layerIndex = clampNumber(Number.isInteger(visible) ? visible : parseInt(layerSelect.value, 10), 0, 5, 2);
+      const opacity = clampNumber(parseInt(opacityInput?.value, 10), 0, 100, 50);
+      const snapshot = {
+        version: 1,
+        layerIndex,
+        opacity,
+        zoom: viewState.zoom,
+        panX: viewState.panX,
+        panY: viewState.panY,
+        flip: !!viewState.flip,
+        helpHidden: !!helpPanel?.hidden,
+        hiddenNetKeys: Array.from(netState.hiddenNetKeys),
+        selectedNetId: netState.selectedNetId || null,
+      };
+      localStorage.setItem(VIEWER_STORAGE_KEY, JSON.stringify(snapshot));
+    } catch (error) {
+      console.warn('Could not save viewer state', error);
+    }
+  }, delay);
+}
+
 function editableTarget(target) {
   if (!(target instanceof HTMLElement)) return false;
   return ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(target.tagName);
@@ -81,6 +154,7 @@ function resetView() {
   viewState.panX = (rect.width - CANVAS_SIZE * viewState.zoom) / 2;
   viewState.panY = (rect.height - CANVAS_SIZE * viewState.zoom) / 2;
   updateSceneTransform();
+  queueViewerStateSave();
 }
 
 function zoomAt(clientX, clientY, nextZoom) {
@@ -102,6 +176,7 @@ function zoomAt(clientX, clientY, nextZoom) {
   }
   viewState.panY = py - worldY * viewState.zoom;
   updateSceneTransform();
+  queueViewerStateSave();
 }
 
 function touchDistance(a, b) {
@@ -120,6 +195,7 @@ function touchMidpoint(a, b) {
 function toggleFlip() {
   viewState.flip = !viewState.flip;
   updateSceneTransform();
+  queueViewerStateSave();
 }
 
 function setNetOverlayVisible(svg, visible) {
@@ -127,15 +203,16 @@ function setNetOverlayVisible(svg, visible) {
   svg.style.display = visible ? 'block' : 'none';
 }
 
-document.querySelector('#opacity').oninput = (e) => {
+opacityInput.oninput = (e) => {
   setVar(document.documentElement, 'opacity', e.target.value / 100);
+  queueViewerStateSave();
 };
 
-document.querySelector('#flip').onclick = () => {
+flipButton.onclick = () => {
   toggleFlip();
 };
 
-document.querySelector('#reset-view').onclick = () => {
+resetViewButton.onclick = () => {
   resetView();
 };
 
@@ -143,11 +220,32 @@ if (helpCloseButton && helpPanel && helpOpenButton) {
   helpCloseButton.onclick = () => {
     helpPanel.hidden = true;
     helpOpenButton.hidden = false;
+    queueViewerStateSave();
   };
   helpOpenButton.onclick = () => {
     helpPanel.hidden = false;
     helpOpenButton.hidden = true;
+    queueViewerStateSave();
   };
+}
+
+if (restoredViewerState) {
+  viewState.flip = restoredViewerState.flip;
+  if (typeof restoredViewerState.selectedNetId === 'string' && restoredViewerState.selectedNetId.length) {
+    netState.selectedNetId = restoredViewerState.selectedNetId;
+  }
+  if (restoredViewerState.hasHiddenNetKeys) {
+    netState.hiddenNetKeys = new Set(restoredViewerState.hiddenNetKeys);
+    netState.groupDefaultsApplied = true;
+  }
+  if (helpPanel && helpOpenButton) {
+    helpPanel.hidden = restoredViewerState.helpHidden;
+    helpOpenButton.hidden = !restoredViewerState.helpHidden;
+  }
+  if (opacityInput) {
+    opacityInput.value = String(restoredViewerState.opacity);
+    setVar(document.documentElement, 'opacity', restoredViewerState.opacity / 100);
+  }
 }
 
 let visible = null;
@@ -166,6 +264,7 @@ function moveTo(i) {
   visible = i;
   pm[visible].hidden = false;
   updateAllLayers();
+  queueViewerStateSave();
 }
 
 function pairedLayerIndex(i) {
@@ -258,7 +357,8 @@ viewport.addEventListener('pointerdown', (e) => {
     return;
   }
 
-  const shouldPan = viewState.isSpaceDown || e.button === 1;
+  const isPrimaryOrMiddle = e.button === 0 || e.button === 1;
+  const shouldPan = viewState.isSpaceDown || isPrimaryOrMiddle;
   if (!shouldPan) return;
   e.preventDefault();
 
@@ -292,6 +392,7 @@ viewport.addEventListener('pointermove', (e) => {
       viewState.panX += deltaX;
       viewState.panY += deltaY;
       updateSceneTransform();
+      queueViewerStateSave();
     }
     interactionState.pinch.lastMidX = midpoint.clientX;
     interactionState.pinch.lastMidY = midpoint.clientY;
@@ -309,6 +410,7 @@ viewport.addEventListener('pointermove', (e) => {
     suppressViewportClickOnce();
   }
   updateSceneTransform();
+  queueViewerStateSave();
 });
 
 viewport.addEventListener('pointerup', (e) => {
@@ -331,6 +433,7 @@ viewport.addEventListener('pointerup', (e) => {
       }
     } else if (viewState.panning && viewState.panning.pointerId === e.pointerId) {
       viewState.panning = null;
+      queueViewerStateSave();
     }
     try {
       viewport.releasePointerCapture(e.pointerId);
@@ -343,6 +446,7 @@ viewport.addEventListener('pointerup', (e) => {
   if (!viewState.panning || viewState.panning.pointerId !== e.pointerId) return;
   viewState.panning = null;
   viewport.releasePointerCapture(e.pointerId);
+  queueViewerStateSave();
 });
 
 viewport.addEventListener('pointercancel', (e) => {
@@ -352,6 +456,7 @@ viewport.addEventListener('pointercancel', (e) => {
   }
   if (viewState.panning && viewState.panning.pointerId === e.pointerId) {
     viewState.panning = null;
+    queueViewerStateSave();
   }
   try {
     viewport.releasePointerCapture(e.pointerId);
@@ -632,6 +737,7 @@ function setNetVisibility(side, netId, visible) {
   }
 
   updateLegend();
+  queueViewerStateSave();
 }
 
 function setSectionVisibility(rows, visible) {
@@ -661,17 +767,22 @@ function setSectionVisibility(rows, visible) {
   }
 
   updateLegend();
+  queueViewerStateSave();
 }
 
 function selectNet(netId) {
-  if (netState.selectedNetId === netId) {
+  const selectedKey = visibilityKey(netState.selectedNetId);
+  const nextKey = visibilityKey(netId);
+  if (nextKey && selectedKey === nextKey) {
     netState.selectedNetId = null;
     updateLegendSelectionState();
+    queueViewerStateSave();
     return;
   }
 
   netState.selectedNetId = netId;
   updateLegendSelectionState();
+  queueViewerStateSave();
 }
 
 function cancelPendingNetSelection() {
@@ -865,12 +976,11 @@ function legendSections(rows) {
 
 function updateLegendSelectionState() {
   const hoveredKey = netState.hoveredNetKey;
-  const selectedNetId = netState.selectedNetId;
+  const selectedNetKey = visibilityKey(netState.selectedNetId);
   legendList.querySelectorAll('li[data-net-key]').forEach((li) => {
     const rowKey = visibilityKey(li.dataset.netKey || '');
-    const rowNetId = String(li.dataset.netId || '');
     const selectedByPathHover = !!rowKey && rowKey === hoveredKey;
-    const selectedByPinnedNet = !!rowNetId && rowNetId === selectedNetId;
+    const selectedByPinnedNet = !!rowKey && rowKey === selectedNetKey;
     li.classList.toggle('is-selected', selectedByPathHover || selectedByPinnedNet);
   });
 }
@@ -961,8 +1071,25 @@ layerSelect.oninput = (e) => {
 };
 
 pm[visible].hidden = false;
-moveTo(2);
-resetView();
+const initialLayer = restoredViewerState
+  ? clampNumber(restoredViewerState.layerIndex, 0, pm.length - 1, 2)
+  : 2;
+moveTo(initialLayer);
+if (
+  restoredViewerState &&
+  Number.isFinite(restoredViewerState.zoom) &&
+  Number.isFinite(restoredViewerState.panX) &&
+  Number.isFinite(restoredViewerState.panY)
+) {
+  viewState.zoom = clampNumber(restoredViewerState.zoom, 0.05, 40, 1);
+  viewState.panX = restoredViewerState.panX;
+  viewState.panY = restoredViewerState.panY;
+  updateSceneTransform();
+} else {
+  resetView();
+}
+suspendViewerStateSave = false;
+queueViewerStateSave(0);
 
 Promise.allSettled(NET_SIDES.map((side) => loadNetOverlay(side))).then((results) => {
   netState.loaded = true;
@@ -977,4 +1104,5 @@ Promise.allSettled(NET_SIDES.map((side) => loadNetOverlay(side))).then((results)
   }
 
   updateAllLayers();
+  queueViewerStateSave();
 });
